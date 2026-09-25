@@ -2,7 +2,7 @@
 const webpush = require('web-push');
 const fs = require('fs');
 const path = require('path');
-const { q } = require('./db');
+const { q, isPg } = require('./db');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
@@ -41,19 +41,26 @@ function ensureVapid() {
 const vapid = ensureVapid();
 
 function ensureTable() {
-  try {
-    q.run(`CREATE TABLE IF NOT EXISTS push_subscriptions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      role TEXT NOT NULL,
-      user_ref TEXT NOT NULL,
-      endpoint TEXT NOT NULL UNIQUE,
-      p256dh TEXT NOT NULL,
-      auth TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )`);
-  } catch (e) {
-    console.warn('push table:', e.message);
-  }
+  const sql = isPg
+    ? `CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id SERIAL PRIMARY KEY,
+        role TEXT NOT NULL,
+        user_ref TEXT NOT NULL,
+        endpoint TEXT NOT NULL UNIQUE,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`
+    : `CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT NOT NULL,
+        user_ref TEXT NOT NULL,
+        endpoint TEXT NOT NULL UNIQUE,
+        p256dh TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`;
+  Promise.resolve(q.run(sql)).catch((e) => console.warn('push table:', e.message));
 }
 
 ensureTable();
