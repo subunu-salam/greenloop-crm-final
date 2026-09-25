@@ -17,7 +17,12 @@ const pool = new Pool({
 // Convert ? placeholders to $1, $2, ... for node-pg
 function toPg(sql, params = []) {
   let i = 0;
-  const text = sql.replace(/\?/g, () => `$${++i}`);
+  const normalized = sql
+    .replace(/\bis_active\s*=\s*1\b/gi, 'is_active = true')
+    .replace(/\bis_active\s*=\s*0\b/gi, 'is_active = false')
+    .replace(/\bis_read\s*=\s*1\b/gi, 'is_read = true')
+    .replace(/\bis_read\s*=\s*0\b/gi, 'is_read = false');
+  const text = normalized.replace(/\?/g, () => `$${++i}`);
   return { text, values: params };
 }
 
