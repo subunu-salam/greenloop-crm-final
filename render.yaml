@@ -1,0 +1,19 @@
+# Backend on Render + Neon Postgres
+# Frontend lives on Cloudflare Pages (see crm-react/)
+services:
+  - type: web
+    name: greenloop-api
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server/index.js
+    healthCheckPath: /api/v1/settings
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false   # set this to your Neon connection string in the Render dashboard
+      - key: NODE_VERSION
+        value: "22"
+      - key: CORS_ORIGIN
+        sync: false   # e.g. https://your-crm.pages.dev

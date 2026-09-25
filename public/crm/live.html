@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GreenLoop — Live Fleet Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #0e1418; color: #e8eef2; }
+  #map { height: calc(100vh - 52px); }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #16202a; border-bottom: 1px solid #263847; }
+  header a { color: #14b8a6; text-decoration: none; font-size: 13px; }
+  #status { margin-left: auto; font-size: 12px; color: #8aa0b0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; margin-right: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <strong style="color:#14b8a6">Live fleet</strong>
+  <a href="/crm/">← CRM</a>
+  <span id="status"><span class="dot"></span>connecting…</span>
+</header>
+<div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const token = sessionStorage.getItem('gl_token');
+if (!token) location.href = '/crm/';
+
+const map = L.map('map').setView([25.2048, 55.2708], 11);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OSM' }).addTo(map);
+const markers = {};
+
+function upsert(p) {
+  if (p.lat == null || p.lng == null) return;
+  const key = p.driver_id;
+  const label = (p.fleet_number || 'DRV') + ' · ' + (p.name || '');
+  if (markers[key]) {
+    markers[key].setLatLng([p.lat, p.lng]);
+    markers[key].setPopupContent(label + '<br>' + new Date(p.at).toLocaleTimeString());
+  } else {
+    markers[key] = L.marker([p.lat, p.lng]).addTo(map).bindPopup(label);
+  }
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/v1/fleet/live', { headers: { Authorization: 'Bearer ' + token } });
+    if (res.status === 401) { location.href = '/crm/'; return; }
+    const data = await res.json();
+    (data.positions || []).forEach(upsert);
+    document.getElementById('status').innerHTML = '<span class="dot"></span>' + (data.positions || []).length + ' active';
+  } catch {
+    document.getElementById('status').textContent = 'offline';
+  }
+}
+
+refresh();
+setInterval(refresh, 15000);
+const sock = io();
+sock.on('connect', () => sock.emit('ops:join'));
+sock.on('driver:location', upsert);
+</script>
+</body>
+</html>

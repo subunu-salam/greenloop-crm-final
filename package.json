@@ -1,0 +1,23 @@
+{
+  "name": "greenloop-waste-logistics",
+  "version": "2.1.0",
+  "description": "Automated Waste Logistics & Fleet Management — Majari UAE",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "build:crm": "cd crm-react && npm install && npm run build",
+    "dev:crm": "cd crm-react && npm run dev"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.2.0",
+    "pg": "^8.13.1",
+    "socket.io": "^4.8.3",
+    "web-push": "^3.6.7"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

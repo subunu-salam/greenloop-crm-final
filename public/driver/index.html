@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json">
+<title>GreenLoop Driver</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="s-login" class="screen">
+  <div class="login-hero">
+    <div class="login-title">GreenLoop Driver</div>
+    <div class="login-sub" id="login-date"></div>
+  </div>
+  <div class="pin-dots" id="pin-dots"><i></i><i></i><i></i><i></i></div>
+  <div class="pad">
+    <button onclick="pinKey(1)">1</button><button onclick="pinKey(2)">2</button><button onclick="pinKey(3)">3</button>
+    <button onclick="pinKey(4)">4</button><button onclick="pinKey(5)">5</button><button onclick="pinKey(6)">6</button>
+    <button onclick="pinKey(7)">7</button><button onclick="pinKey(8)">8</button><button onclick="pinKey(9)">9</button>
+    <button class="pad-ghost"></button><button onclick="pinKey(0)">0</button>
+    <button class="pad-del" onclick="pinDel()">⌫</button>
+  </div>
+  <div id="login-msg" class="login-err"></div>
+</div>
+<div id="s-app" class="app hidden">
+  <header class="appbar">
+    <div class="avatar" id="hdr-avatar">–</div>
+    <div class="hdr-text">
+      <div class="hdr-name" id="hdr-greet">–</div>
+      <div class="hdr-sub"><span id="hdr-date"></span> · <span id="hdr-live" class="live"><i class="livedot"></i> LIVE</span></div>
+    </div>
+    <button class="bell" onclick="toggleNotifs()" aria-label="notifications"><span id="bell-badge" class="bell-badge hidden">0</span></button>
+  </header>
+  <div id="notif-panel" class="notif-panel hidden">
+    <div class="notif-head">Notifications <button class="notif-clear" onclick="clearNotifs()">Clear all</button></div>
+    <div id="notif-list" class="notif-list"></div>
+  </div>
+  <main id="v-home" class="view"></main>
+  <main id="v-history" class="view hidden"></main>
+  <main id="v-account" class="view hidden"></main>
+  <nav class="tabbar">
+    <button data-tab="home" class="tab on" onclick="switchTab('home')"><span>Route</span></button>
+    <button data-tab="history" class="tab" onclick="switchTab('history')"><span>History</span></button>
+    <button data-tab="account" class="tab" onclick="switchTab('account')"><span>Account</span></button>
+  </nav>
+</div>
+<div id="s-job" class="overlay hidden">
+  <header class="ovbar">
+    <button class="backbtn" onclick="closeJob()">←</button>
+    <div class="ovtitle" id="job-name">–</div>
+  </header>
+  <div class="jobbody">
+    <div class="jobmeta" id="job-meta"></div>
+    <div class="stepper" id="stepper"></div>
+    <div id="job-actions" class="job-actions"></div>
+  </div>
+  <input type="file" id="camera" accept="image/*" capture="environment" hidden>
+</div>
+<div id="s-reasons" class="overlay hidden">
+  <header class="ovbar">
+    <button class="backbtn" onclick="hideReasons()">←</button>
+    <div class="ovtitle">Why no pickup?</div>
+  </header>
+  <div class="jobbody">
+    <button class="reason" onclick="cancelJob('BIN_EMPTY')"><span>BIN EMPTY</span></button>
+    <button class="reason" onclick="cancelJob('ACCESS_BLOCKED')"><span>ACCESS BLOCKED</span></button>
+    <button class="reason" onclick="cancelJob('MANAGER_REFUSED')"><span>MANAGER SAID NO</span></button>
+  </div>
+</div>
+<div id="sync-banner" class="sync-banner hidden"><span id="sync-count"></span> saved offline</div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+<script src="tracking.js"></script>
+<script src="features.js"></script>
+<script src="pwa-setup.js"></script>
+</body>
+</html>

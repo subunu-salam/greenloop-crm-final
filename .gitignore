@@ -1,0 +1,6 @@
+node_modules/
+data.sqlite*
+uploads/
+mobile-expo/node_modules/
+.env
+deploy/.env

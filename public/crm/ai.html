@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GreenLoop — AI Ops Brief</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #0e1418; color: #e8eef2; padding: 20px; }
+  a { color: #14b8a6; }
+  .card { background: #16202a; border: 1px solid #263847; border-radius: 12px; padding: 16px; margin-bottom: 14px; max-width: 720px; }
+  .sev-critical { color: #f43f5e; } .sev-warning { color: #f59e0b; } .sev-ok { color: #22c55e; } .sev-info { color: #38bdf8; }
+  h1 { font-size: 1.25rem; }
+  .muted { color: #8aa0b0; font-size: 13px; }
+  button { background: #0f766e; color: #fff; border: 0; padding: 10px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+</style>
+</head>
+<body>
+<p><a href="/crm/">← CRM</a> · <a href="/crm/live.html">Live map</a></p>
+<h1>AI Ops Brief</h1>
+<p class="muted">Rule-based insights always on. Set OPENAI_API_KEY on the server for richer narrative.</p>
+<button onclick="load()">Refresh brief</button>
+<div id="out" style="margin-top:16px">Loading…</div>
+<script>
+const token = sessionStorage.getItem('gl_token');
+if (!token) location.href = '/crm/';
+async function load() {
+  const out = document.getElementById('out');
+  out.textContent = 'Loading…';
+  try {
+    const res = await fetch('/api/v1/ai/ops-brief', { headers: { Authorization: 'Bearer ' + token } });
+    if (res.status === 401) { location.href = '/crm/'; return; }
+    const b = await res.json();
+    out.innerHTML = `
+      <div class="card"><strong>Narrative</strong><p>${escapeHtml(b.narrative || '')}</p></div>
+      <div class="card"><strong>Today totals</strong>
+        <p class="muted">Collected ${b.totals?.collected||0} · Pending ${b.totals?.pending||0} ·
+        No-pickup ${b.totals?.canceled||0} · Overdue ${b.totals?.overdue||0}
+        ${b.completion_rate!=null?' · '+b.completion_rate+'% closed completion':''}</p></div>
+      <div class="card"><strong>Insights</strong><ul>${(b.insights||[]).map(i=>
+        `<li class="sev-${i.severity}">${escapeHtml(i.text)}</li>`).join('')}</ul></div>
+      <div class="card"><strong>Drivers</strong><ul>${(b.drivers||[]).map(d=>
+        `<li>${escapeHtml(d.full_name)} (${escapeHtml(d.fleet_number||'—')}): ${d.collected||0} done, ${d.pending||0} pending</li>`).join('')||'<li class="muted">None</li>'}</ul></div>`;
+  } catch (e) {
+    out.textContent = e.message;
+  }
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+load();
+</script>
+</body>
+</html>

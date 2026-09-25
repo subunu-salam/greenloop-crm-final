@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, 'Segoe UI', system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: dark;
+  color: #e8eef2;
+  background-color: #0e1418;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.leaflet-container {
+  background: #1c2a36;
+  font-family: inherit;
+}
+.leaflet-popup-content-wrapper {
+  background: #16202a;
+  color: #e8eef2;
+  border-radius: 10px;
+}
+.leaflet-popup-tip {
+  background: #16202a;
+}
+
+[dir="rtl"] .sidebar {
+  border-right: none;
+  border-left: 1px solid #263847;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0e1418;
+}
+::-webkit-scrollbar-thumb {
+  background: #263847;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #14b8a6;
+}
+
+.pill {
+  @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wide;
+}
+.pill-pending { @apply bg-amber-900/40 text-amber-400; }
+.pill-collected { @apply bg-green-900/40 text-green-400; }
+.pill-canceled { @apply bg-red-900/40 text-red-400; }
+.pill-overdue { @apply bg-red-600 text-white animate-pulse; }
+.pill-rescheduled { @apply bg-sky-900/40 text-sky-400; }

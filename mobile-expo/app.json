@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "GreenLoop Driver",
+    "slug": "greenloop-driver",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#f4f6f5",
+    "splash": { "backgroundColor": "#0f766e" },
+    "ios": {
+      "bundleIdentifier": "com.greenloop.driver",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Take a verification photo of the waste bin at each pickup.",
+        "NSLocationWhenInUseUsageDescription": "Record the pickup location for verification."
+      }
+    },
+    "android": {
+      "package": "com.greenloop.driver",
+      "permissions": ["CAMERA", "ACCESS_FINE_LOCATION"]
+    },
+    "plugins": ["expo-image-picker", "expo-location"]
+  }
+}

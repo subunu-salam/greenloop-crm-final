@@ -1,0 +1,17 @@
+{
+  "name": "GreenLoop Driver",
+  "short_name": "Driver",
+  "start_url": "/driver/",
+  "display": "standalone",
+  "background_color": "#0e1418",
+  "theme_color": "#0f766e",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icons.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

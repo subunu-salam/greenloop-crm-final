@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.json">
+<title>GreenLoop Customer</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="s-login" class="screen">
+  <div class="login-hero">
+    <div class="login-title">Store Portal</div>
+    <div class="login-sub">Track pickups · Photo proof · Updates</div>
+  </div>
+  <p class="hint">Enter your 4-digit store code</p>
+  <div class="pin-dots" id="pin-dots"><i></i><i></i><i></i><i></i></div>
+  <div class="pad">
+    <button onclick="pinKey(1)">1</button><button onclick="pinKey(2)">2</button><button onclick="pinKey(3)">3</button>
+    <button onclick="pinKey(4)">4</button><button onclick="pinKey(5)">5</button><button onclick="pinKey(6)">6</button>
+    <button onclick="pinKey(7)">7</button><button onclick="pinKey(8)">8</button><button onclick="pinKey(9)">9</button>
+    <button class="pad-ghost"></button><button onclick="pinKey(0)">0</button>
+    <button class="pad-del" onclick="pinDel()">⌫</button>
+  </div>
+  <div id="login-msg" class="login-err"></div>
+  <p class="demo">Demo codes: <b>1001</b> · <b>1002</b> · <b>1003</b></p>
+</div>
+<div id="s-app" class="app hidden">
+  <header class="appbar">
+    <div class="avatar" id="hdr-avatar">S</div>
+    <div class="hdr-text">
+      <div class="hdr-name" id="hdr-name">–</div>
+      <div class="hdr-sub" id="hdr-sub">–</div>
+    </div>
+    <span class="live" id="hdr-live"><i class="livedot"></i> LIVE</span>
+  </header>
+  <main id="v-home" class="view"></main>
+  <main id="v-history" class="view hidden"></main>
+  <main id="v-more" class="view hidden"></main>
+  <nav class="tabbar">
+    <button class="tab on" data-tab="home" onclick="switchTab('home')">Today</button>
+    <button class="tab" data-tab="history" onclick="switchTab('history')">History</button>
+    <button class="tab" data-tab="more" onclick="switchTab('more')">More</button>
+  </nav>
+</div>
+<div id="s-detail" class="overlay hidden">
+  <header class="ovbar">
+    <button class="backbtn" onclick="closeDetail()">←</button>
+    <div class="ovtitle" id="det-title">Visit</div>
+  </header>
+  <div class="jobbody" id="det-body"></div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+<script src="pwa-setup.js"></script>
+</body>
+</html>

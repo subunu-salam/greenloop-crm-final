@@ -1,0 +1,17 @@
+{
+  "name": "GreenLoop Store Portal",
+  "short_name": "Store Portal",
+  "start_url": "/customer/",
+  "display": "standalone",
+  "background_color": "#0e1418",
+  "theme_color": "#0f766e",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icons.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

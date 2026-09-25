@@ -1,0 +1,13 @@
+# Automatic HTTPS via Let's Encrypt — just set DOMAIN in .env
+{$DOMAIN} {
+	reverse_proxy app:3000
+	encode gzip
+
+	# WebSocket support is automatic in Caddy's reverse_proxy
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+}
