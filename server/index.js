@@ -50,7 +50,7 @@ app.use('/customer', express.static(path.join(__dirname, '..', 'public', 'custom
 
 const crmV2 = path.join(__dirname, '..', 'public', 'crm-v2');
 app.use('/crm-v2', express.static(crmV2));
-app.get('/crm-v2/*', (req, res) => {
+app.get('/crm-v2/*splat', (req, res) => {
   res.sendFile(path.join(crmV2, 'index.html'), (err) => {
     if (err) res.redirect('/crm');
   });
