@@ -28,26 +28,25 @@ function authCustomer(req, res, next) {
 }
 
 function mountCustomerRoutes(r, io) {
-  // Ensure portal_code column exists (SQLite)
-  try {
-    q.run(`ALTER TABLE customers ADD COLUMN portal_code_hash TEXT`);
-  } catch {
+  // Ensure portal_code column exists
+  Promise.resolve(q.run(`ALTER TABLE customers ADD COLUMN portal_code_hash TEXT`)).catch(() => {
     /* already exists */
-  }
+  });
 
   // Seed demo portal codes for first 3 customers if missing
-  try {
-    const need = q.all(
+  Promise.resolve(
+    q.all(
       `SELECT id FROM customers WHERE is_active=1 AND (portal_code_hash IS NULL OR portal_code_hash='') ORDER BY id LIMIT 3`
-    );
-    const codes = ['1001', '1002', '1003'];
-    need.forEach((c, i) => {
-      if (codes[i])
-        q.run(`UPDATE customers SET portal_code_hash=? WHERE id=?`, bcrypt.hashSync(codes[i], 10), c.id);
-    });
-  } catch (e) {
-    console.warn('Customer portal seed:', e.message);
-  }
+    )
+  )
+    .then((need) => {
+      const codes = ['1001', '1002', '1003'];
+      need.forEach((c, i) => {
+        if (codes[i])
+          q.run(`UPDATE customers SET portal_code_hash=? WHERE id=?`, bcrypt.hashSync(codes[i], 10), c.id);
+      });
+    })
+    .catch((e) => console.warn('Customer portal seed:', e.message));
 
   r.post('/auth/customer-login', (req, res) => {
     const code = String((req.body || {}).code || '');
