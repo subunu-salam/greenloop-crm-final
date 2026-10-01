@@ -169,6 +169,14 @@ function connectSocket() {
     sock = io();
     sock.on('connect', () => $('#hdr-live').classList.remove('off'));
     sock.on('disconnect', () => $('#hdr-live').classList.add('off'));
+    sock.on('driver:at-risk', d => {
+      if (driver && d.driver_id === driver.id) {
+        const j = jobs.find(x => x.id === d.pickup_id);
+        pushNotif('bad', 'Stop at risk', `${j ? j.name : 'Job #' + d.pickup_id} — window closes ${d.window_end}`);
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        if (activeTab === 'home') renderHome();
+      }
+    });
     sock.on('driver:queue-updated', d => {
       if (driver?.vehicle && d.vehicle_id === driver.vehicle.id) {
         pushNotif('info', 'Route updated', 'The office changed your pickup queue. Check your route.');
@@ -189,158 +197,299 @@ function switchTab(tab) {
   if (tab === 'account') renderAccount();
 }
 
-// ── HOME (today's route) ─────────────────────────────────────
+// ── i18n (DRV-12): English · हिन्दी · اردو · العربية ─────────
+const LANGS = { en: 'English', hi: 'हिन्दी', ur: 'اردو', ar: 'العربية' };
+const TR = {
+  en: { route: 'Route', history: 'History', account: 'Account', today: "Today's route", done: 'done', pickups: 'Stops', none: 'No stops scheduled today.<br>Enjoy the break!',
+    start: 'START JOB', photo: 'TAKE PROOF PHOTO', nopick: 'NOT PICKED UP', navigate: 'Navigate', call: 'Call site', arrived: "I'VE ARRIVED",
+    checklist: 'Checklist — tick every item', why: 'Why not picked up?', CLOSED: 'Site closed', NO_ACCESS: 'No access', NO_WASTE: 'No waste', CUSTOMER_REFUSED: 'Customer refused',
+    left: 'left', closes: 'Closes in', missed: 'Window missed', opens: 'Opens', waitingGps: 'Waiting for GPS…', capture: 'Capture', retake: 'Retake', use: 'Use photo',
+    rejected: 'PHOTO REJECTED', completed: 'COMPLETED', reported: 'REPORTED', saved: 'SAVED — WILL SEND', camBlocked: 'Camera access is required. Allow the camera for this app — gallery uploads are not accepted.',
+    sAccepted: 'Job started', sInProgress: 'On site', sPhoto: 'Proof photo', sDone: 'Completed', lang: 'Language', notes: 'Access notes', revisit: 'Free revisit', stepHelp: ['Tap Start when you set off to this stop', 'Do the job, tick the checklist, then take the live photo', 'Photo + GPS + time stamped on the phone and checked by the office', 'All done — next stop!'] },
+  hi: { route: 'रूट', history: 'इतिहास', account: 'खाता', today: 'आज का रूट', done: 'पूरे', pickups: 'स्टॉप', none: 'आज कोई स्टॉप नहीं।', start: 'काम शुरू करें', photo: 'प्रूफ़ फ़ोटो लें', nopick: 'पिकअप नहीं हुआ',
+    navigate: 'नेविगेट', call: 'कॉल करें', arrived: 'मैं पहुँच गया', checklist: 'चेकलिस्ट — हर आइटम टिक करें', why: 'पिकअप क्यों नहीं हुआ?', CLOSED: 'दुकान बंद', NO_ACCESS: 'पहुँच नहीं', NO_WASTE: 'कचरा नहीं', CUSTOMER_REFUSED: 'ग्राहक ने मना किया',
+    left: 'बाकी', closes: 'बंद होगा', missed: 'समय निकल गया', opens: 'खुलेगा', waitingGps: 'GPS का इंतज़ार…', capture: 'फ़ोटो लें', retake: 'फिर से', use: 'यह फ़ोटो भेजें', rejected: 'फ़ोटो अस्वीकृत', completed: 'पूरा हुआ', reported: 'रिपोर्ट हो गया', saved: 'सेव — बाद में भेजेंगे',
+    camBlocked: 'कैमरा अनुमति ज़रूरी है। गैलरी से फ़ोटो नहीं चलेगी।', sAccepted: 'काम शुरू', sInProgress: 'साइट पर', sPhoto: 'प्रूफ़ फ़ोटो', sDone: 'पूरा', lang: 'भाषा', notes: 'पहुँच नोट्स', revisit: 'मुफ़्त दोबारा विज़िट', stepHelp: ['निकलते समय शुरू दबाएँ', 'काम करें, चेकलिस्ट टिक करें, फिर फ़ोटो लें', 'फ़ोटो पर GPS और समय की मुहर लगती है', 'पूरा — अगला स्टॉप!'] },
+  ur: { route: 'روٹ', history: 'تاریخ', account: 'اکاؤنٹ', today: 'آج کا روٹ', done: 'مکمل', pickups: 'اسٹاپ', none: 'آج کوئی اسٹاپ نہیں۔', start: 'کام شروع کریں', photo: 'ثبوت کی تصویر لیں', nopick: 'پک اپ نہیں ہوا',
+    navigate: 'راستہ', call: 'کال کریں', arrived: 'میں پہنچ گیا', checklist: 'چیک لسٹ — ہر آئٹم پر نشان لگائیں', why: 'پک اپ کیوں نہیں ہوا؟', CLOSED: 'دکان بند', NO_ACCESS: 'رسائی نہیں', NO_WASTE: 'کچرا نہیں', CUSTOMER_REFUSED: 'گاہک نے انکار کیا',
+    left: 'باقی', closes: 'بند ہو گا', missed: 'وقت گزر گیا', opens: 'کھلے گا', waitingGps: 'GPS کا انتظار…', capture: 'تصویر لیں', retake: 'دوبارہ', use: 'یہ تصویر بھیجیں', rejected: 'تصویر مسترد', completed: 'مکمل', reported: 'رپورٹ ہو گئی', saved: 'محفوظ — بعد میں بھیجیں گے',
+    camBlocked: 'کیمرے کی اجازت ضروری ہے۔ گیلری کی تصویر قبول نہیں۔', sAccepted: 'کام شروع', sInProgress: 'سائٹ پر', sPhoto: 'ثبوت کی تصویر', sDone: 'مکمل', lang: 'زبان', notes: 'رسائی نوٹس', revisit: 'مفت دوبارہ وزٹ', stepHelp: ['روانگی پر شروع دبائیں', 'کام کریں، چیک لسٹ، پھر تصویر', 'تصویر پر GPS اور وقت کی مہر', 'مکمل — اگلا اسٹاپ!'] },
+  ar: { route: 'المسار', history: 'السجل', account: 'الحساب', today: 'مسار اليوم', done: 'مكتمل', pickups: 'المحطات', none: 'لا توجد محطات اليوم.', start: 'ابدأ المهمة', photo: 'التقط صورة الإثبات', nopick: 'لم يتم الاستلام',
+    navigate: 'الملاحة', call: 'اتصال', arrived: 'وصلت', checklist: 'قائمة التحقق — أكمل كل البنود', why: 'لماذا لم يتم الاستلام؟', CLOSED: 'الموقع مغلق', NO_ACCESS: 'لا يمكن الدخول', NO_WASTE: 'لا توجد نفايات', CUSTOMER_REFUSED: 'رفض العميل',
+    left: 'متبقٍ', closes: 'يغلق خلال', missed: 'فات الموعد', opens: 'يفتح', waitingGps: 'بانتظار GPS…', capture: 'التقاط', retake: 'إعادة', use: 'استخدم الصورة', rejected: 'تم رفض الصورة', completed: 'تم', reported: 'تم الإبلاغ', saved: 'محفوظ — سيُرسل لاحقًا',
+    camBlocked: 'يجب السماح بالكاميرا. لا تُقبل الصور من المعرض.', sAccepted: 'بدأت المهمة', sInProgress: 'في الموقع', sPhoto: 'صورة الإثبات', sDone: 'مكتمل', lang: 'اللغة', notes: 'ملاحظات الدخول', revisit: 'زيارة مجانية', stepHelp: ['اضغط ابدأ عند الانطلاق', 'نفّذ المهمة ثم قائمة التحقق ثم الصورة', 'الصورة مختومة بالموقع والوقت', 'تم — المحطة التالية!'] },
+};
+let LANG = localStorage.getItem('gl_drv_lang') || 'en';
+const t = k => (TR[LANG] && TR[LANG][k]) || TR.en[k] || k;
+function applyLang() {
+  document.documentElement.lang = LANG;
+  document.documentElement.dir = ['ur', 'ar'].includes(LANG) ? 'rtl' : 'ltr';
+  document.querySelectorAll('[data-t]').forEach(el => { el.textContent = t(el.dataset.t); });
+}
+function setLang(l) { LANG = l; localStorage.setItem('gl_drv_lang', l); applyLang(); if (activeTab === 'account') renderAccount(); }
+
+Object.assign(IC, {
+  nav: '<polygon points="3 11 22 2 13 21 11 13 3 11"/>',
+  flag: '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/>',
+  bug: '<rect x="8" y="6" width="8" height="14" rx="4"/><path d="M19 7l-3 2M5 7l3 2M19 19l-3-2M5 19l3-2M20 13h-4M4 13h4M10 4l1 2M14 4l-1 2"/>',
+  alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  shutter: '<circle cx="12" cy="12" r="9"/>',
+});
+
+// ── jobs (with time windows, service type, checklist, maps link) ──
+let clockOffsetMs = 0; // server − device, for countdown display only
 async function loadJobs() {
   try {
-    const res = await fetch(API + '/driver/jobs', { headers: { Authorization: 'Bearer ' + token } });
+    const res = await fetch(API + '/driver/jobs-v3', { headers: { Authorization: 'Bearer ' + token } });
     if (res.status === 401) return logout();
     const data = await res.json();
     jobs = data.jobs;
-  } catch { /* offline — keep last list */ }
+    clockOffsetMs = Date.parse(data.server_now) - Date.now();
+    localStorage.setItem('gl_drv_jobs', JSON.stringify(jobs));
+  } catch { jobs = jobs.length ? jobs : JSON.parse(localStorage.getItem('gl_drv_jobs') || '[]'); }
 }
 
-// order stage model: pending(+no stage)=step0 · acknowledged=step1 · photo sent=step3 · collected=step4 · canceled=ended
+// time-window countdown (DRV-11)
+function windowState(j) {
+  if (!j.time_window || ['collected', 'canceled'].includes(j.status)) return null;
+  const now = new Date(Date.now() + clockOffsetMs);
+  const [s, e] = j.time_window.split('-');
+  const at = hm => { const d = new Date(now); const [h, m] = hm.split(':').map(Number); d.setHours(h, m, 0, 0); return d; };
+  const start = at(s), end = at(e);
+  const mins = Math.round((end - now) / 60000);
+  const fmt = m => m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+  if (now < start) return { cls: 'future', text: `${t('opens')} ${s}`, mins };
+  if (mins < 0) return { cls: 'missed', text: t('missed'), mins };
+  if (mins <= 30) return { cls: 'risk', text: `${t('closes')} ${fmt(mins)}`, mins };
+  return { cls: 'ok', text: `${fmt(mins)} ${t('left')}`, mins };
+}
+function windowChip(j) {
+  const w = windowState(j);
+  if (!w) return j.time_window ? `<span class="win">${svg(IC.clock, 12)} ${esc(j.time_window)}</span>` : '';
+  return `<span class="win ${w.cls}">${svg(IC.clock, 12)} ${esc(j.time_window)} · ${w.text}</span>`;
+}
+
+// order stage model: pending=0 · acknowledged/arrived=1 · sending=2 · collected=4 · canceled=ended
 function jobSteps(j) {
   if (j.status === 'collected') return 4;
   if (j.status === 'canceled') return -1;
-  if (j.stage === 'acknowledged') return 1;
+  if (j.stage === 'acknowledged' || j.stage === 'arrived') return 1;
   return 0;
 }
-const STEP_LABELS = ['Pickup accepted', 'Collection in progress', 'Photo uploaded', 'Order completed'];
+const stepLabels = () => [t('sAccepted'), t('sInProgress'), t('sPhoto'), t('sDone')];
 
 function ministeps(j) {
   const s = jobSteps(j);
   if (s === -1) return `<div class="ministeps"><span class="ms bad">${svg(IC.x, 12)}</span><span class="ln"></span><span class="ms bad">${svg(IC.ban, 12)}</span></div>`;
-  return `<div class="ministeps">${STEP_LABELS.map((_, i) =>
+  return `<div class="ministeps">${[0, 1, 2, 3].map(i =>
     `<span class="ms ${i < s ? 'done' : ''}">${i < s ? svg(IC.check, 12) : i + 1}</span>${i < 3 ? `<span class="ln ${i < s - 1 ? 'done' : ''}"></span>` : ''}`).join('')}</div>`;
 }
 function chip(j) {
   if (j.status === 'collected') return `<span class="chip collected">${svg(IC.check, 11)} Done</span>`;
-  if (j.status === 'canceled') return `<span class="chip canceled">${svg(IC.x, 11)} No pickup</span>`;
+  if (j.status === 'canceled') return `<span class="chip canceled">${svg(IC.x, 11)} ${j.confirmation_status === 'awaiting' ? 'Awaiting' : 'No pickup'}</span>`;
   if (j.status === 'overdue') return `<span class="chip overdue">${svg(IC.clock, 11)} Overdue</span>`;
-  if (j.stage === 'acknowledged') return `<span class="chip progress">${svg(IC.play, 11)} In progress</span>`;
+  if (j.stage === 'acknowledged' || j.stage === 'arrived') return `<span class="chip progress">${svg(IC.play, 11)} Active</span>`;
   return `<span class="chip pending">${svg(IC.clock, 11)} Waiting</span>`;
 }
+const catPill = j => `<span class="cat ${j.category || 'waste'}">${svg(j.category === 'pest' ? IC.bug : IC.truck, 11)} ${esc(j.service_name || j.service_type || 'Waste')}</span>`;
 
 function renderHome() {
   const done = jobs.filter(j => ['collected', 'canceled'].includes(j.status)).length;
   const pct = jobs.length ? Math.round(100 * done / jobs.length) : 0;
+  const risk = jobs.filter(j => (windowState(j) || {}).cls === 'risk' && jobSteps(j) === 0).length;
   $('#v-home').innerHTML = `
     <div class="sumcard">
-      <div class="sumtop"><span class="sumtitle">${svg(IC.calendar, 16)} Today's route</span>
-      <span class="sumcount">${done} / ${jobs.length} done</span></div>
+      <div class="sumtop"><span class="sumtitle">${svg(IC.calendar, 16)} ${t('today')}</span>
+      <span class="sumcount">${done} / ${jobs.length} ${t('done')}</span></div>
       <div class="progressbar"><i style="width:${pct}%"></i></div>
+      ${risk ? `<div class="riskbar">${svg(IC.alert, 15)} ${risk} stop${risk > 1 ? 's' : ''} at risk — window closes within 30 min</div>` : ''}
     </div>
-    <div class="h-sec">Pickups${driver?.vehicle ? ` — ${esc(driver.vehicle.fleet_number)}` : ''}</div>
-    ${jobs.map((j, i) => `
-      <button class="job-card" onclick="openJob(${j.id})" ${['collected', 'canceled'].includes(j.status) ? 'disabled' : ''}>
+    <div class="h-sec">${t('pickups')}${driver?.vehicle ? ` · ${esc(driver.vehicle.fleet_number)}` : ''}</div>
+    ${jobs.map((j, i) => {
+      const w = windowState(j);
+      return `
+      <button class="job-card ${w && w.cls === 'risk' && jobSteps(j) === 0 ? 'atrisk' : ''}" onclick="openJob(${j.id})" ${['collected', 'canceled'].includes(j.status) ? 'disabled' : ''}>
         <div class="jc-top">
           <span class="jc-num">${j.seq || i + 1}</span>
           <span class="jc-name">${esc(j.name)}<small>${esc(j.branch || '')} · ${esc(j.zone)}</small></span>
           ${chip(j)}
         </div>
+        <div class="jc-tags">${catPill(j)} ${windowChip(j)} ${j.is_revisit ? `<span class="cat">${t('revisit')}</span>` : ''}</div>
         ${ministeps(j)}
-      </button>`).join('') || '<div class="empty">No pickups scheduled today.<br>Enjoy the break!</div>'}`;
+      </button>`;
+    }).join('') || `<div class="empty">${t('none')}</div>`}`;
 }
+setInterval(() => { if (activeTab === 'home' && token && $('#s-job').classList.contains('hidden') && $('#s-cam').classList.contains('hidden')) renderHome(); }, 30_000);
 
-// ── JOB DETAIL + stepper ─────────────────────────────────────
+// ── JOB DETAIL ───────────────────────────────────────────────
+let checks = {};
 function openJob(id) {
   currentJob = jobs.find(j => j.id === id);
   if (!currentJob) return;
-  $('#job-name').textContent = currentJob.name;
-  $('#job-meta').innerHTML = `<b>${esc(currentJob.name)}</b>
-    <span>${svg(IC.pin, 13)} ${esc(currentJob.branch || '')} · ${esc(currentJob.zone)}</span>
-    <span>${esc(currentJob.address || '')}</span>`;
+  checks = {};
+  const j = currentJob;
+  $('#job-name').textContent = j.name;
+  $('#job-meta').innerHTML = `<b>${esc(j.name)}</b>
+    <span>${svg(IC.pin, 13)} ${esc(j.branch || '')} · ${esc(j.zone)}</span>
+    <span>${esc(j.address || '')}</span>
+    <div class="jc-tags">${catPill(j)} ${windowChip(j)}</div>
+    ${j.access_notes ? `<div class="notes"><span>${t('notes')}</span>${esc(j.access_notes)}</div>` : ''}
+    <div class="quick">
+      ${j.maps_url ? `<a class="qbtn nav" href="${esc(j.maps_url)}" target="_blank" rel="noopener">${svg(IC.nav, 18)} ${t('navigate')}</a>` : ''}
+      ${j.contact_phone ? `<a class="qbtn" href="tel:${esc(j.contact_phone)}">${svg(IC.phone, 18)} ${t('call')}</a>` : ''}
+    </div>`;
   renderJobDetail();
   $('#s-job').classList.remove('hidden');
 }
 function closeJob() { $('#s-job').classList.add('hidden'); renderHome(); }
 
 function renderJobDetail(forceStep) {
-  const s = forceStep !== undefined ? forceStep : jobSteps(currentJob);
-  $('#stepper').innerHTML = STEP_LABELS.map((lbl, i) => {
+  const j = currentJob;
+  const s = forceStep !== undefined ? forceStep : jobSteps(j);
+  const help = t('stepHelp');
+  $('#stepper').innerHTML = stepLabels().map((lbl, i) => {
     const done = i < s, active = i === s;
     return `<div class="step ${done ? 'done' : ''} ${active ? 'active' : ''}">
       <div class="rail"><div class="bub">${done ? svg(IC.check, 15) : i + 1}</div><div class="vline"></div></div>
-      <div class="stext"><div class="stitle">${lbl}</div>
-      <div class="ssub">${['Tap Start Pickup when you arrive', 'Collect the waste, then take the photo', 'Photo + location sent to the office', 'All done — next stop!'][i]}</div></div>
-    </div>`;
+      <div class="stext"><div class="stitle">${lbl}</div><div class="ssub">${help[i]}</div></div></div>`;
   }).join('');
-
   const A = $('#job-actions');
+  const list = j.checklist || [];
+  const needChecks = list.length && j.category === 'pest';
+  const allTicked = list.every((_, i) => checks[i]);
   if (s === 0) {
-    A.innerHTML = `<button class="giant teal" onclick="ackJob()">${svg(IC.play)}<span>START PICKUP</span></button>`;
+    A.innerHTML = `<button class="giant teal" onclick="ackJob()">${svg(IC.play)}<span>${t('start')}</span></button>`;
   } else if (s === 1) {
     A.innerHTML = `
-      <button class="giant green" onclick="startPhoto()">${svg(IC.camera)}<span>TAKE PICKUP PHOTO</span></button>
-      <button class="giant red" onclick="showReasons()">${svg(IC.ban)}<span>NO PICKUP TODAY</span></button>`;
+      ${j.stage !== 'arrived' ? `<button class="wide-btn" onclick="arrive()">${svg(IC.flag, 18)} ${t('arrived')}</button>` : ''}
+      ${list.length ? `<div class="checklist"><div class="cl-head">${svg(IC.check, 15)} ${t('checklist')}${needChecks ? '' : ' <small>(optional)</small>'}</div>
+        ${list.map((c, i) => `<button class="cl-item ${checks[i] ? 'on' : ''}" onclick="toggleCheck(${i})"><span class="box">${checks[i] ? svg(IC.check, 16) : ''}</span>${esc(c)}</button>`).join('')}</div>` : ''}
+      <button class="giant green" ${needChecks && !allTicked ? 'disabled' : ''} onclick="openCamera('complete')">${needChecks && !allTicked ? svg(IC.lock) : svg(IC.camera)}<span>${t('photo')}</span></button>
+      <button class="giant red" onclick="showReasons()">${svg(IC.ban)}<span>${t('nopick')}</span></button>`;
   } else if (s === 2) {
     A.innerHTML = `<button class="giant teal" disabled>${svg(IC.upload)}<span>SENDING…</span></button>`;
-  } else {
-    A.innerHTML = '';
-  }
+  } else A.innerHTML = '';
 }
+function toggleCheck(i) { checks[i] = !checks[i]; renderJobDetail(); }
 
 async function ackJob() {
   if (!currentJob) return;
-  currentJob.stage = 'acknowledged'; // optimistic
+  currentJob.stage = 'acknowledged';
   renderJobDetail();
-  try {
-    await fetch(`${API}/pickups/${currentJob.id}/ack`, { method: 'POST', headers: { Authorization: 'Bearer ' + token } });
-  } catch { /* offline — server learns on completion */ }
+  try { await fetch(`${API}/pickups/${currentJob.id}/ack`, { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch { /* offline */ }
 }
-
-// telemetry
-function getGPS() {
-  return new Promise(resolve => {
-    if (!navigator.geolocation) return resolve({ lat: null, lng: null });
-    navigator.geolocation.getCurrentPosition(
-      p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
-      () => resolve({ lat: null, lng: null }),
-      { enableHighAccuracy: true, timeout: 6000 });
-  });
-}
-
-// Action: photo + complete
-function startPhoto() { $('#camera').click(); }
-$('#camera').addEventListener('change', async e => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file || !currentJob) return;
-  renderJobDetail(2); // "photo uploaded / sending"
-  const gps = await getGPS();
-  const payload = {
-    kind: 'complete', pickupId: currentJob.id,
-    lat: gps.lat, lng: gps.lng, client_ts: new Date().toISOString(),
-    photo: await fileToDataUrl(file),
-  };
-  const ok = await sendOrQueue(payload);
-  currentJob.status = 'collected'; currentJob.stage = 'completed';
-  renderJobDetail(4);
-  pushNotif('ok', 'Pickup completed', `${currentJob.name} — ${ok ? 'sent to office' : 'saved, will send automatically'}`);
-  flash(true, ok ? 'COMPLETED' : 'SAVED — WILL SEND');
-});
-
-// Action: no pickup
-function showReasons() { $('#s-reasons').classList.remove('hidden'); }
-function hideReasons() { $('#s-reasons').classList.add('hidden'); }
-async function cancelJob(reason) {
-  hideReasons();
+async function arrive() {
   if (!currentJob) return;
-  const gps = await getGPS();
-  const payload = { kind: 'cancel', pickupId: currentJob.id, reason, lat: gps.lat, lng: gps.lng, client_ts: new Date().toISOString() };
-  const ok = await sendOrQueue(payload);
-  currentJob.status = 'canceled';
-  pushNotif('bad', 'No pickup reported', `${currentJob.name} — ${reason.replace(/_/g, ' ').toLowerCase()}`);
-  flash(false, ok ? 'REPORTED' : 'SAVED — WILL SEND');
+  currentJob.stage = 'arrived';
+  renderJobDetail();
+  try { await fetch(`${API}/pickups/${currentJob.id}/arrive`, { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch {}
 }
 
-function flash(good, msg) {
+// ── NOT PICKED UP ────────────────────────────────────────────
+let npuReason = null;
+function showReasons() {
+  $('#reasons-body').innerHTML = ['CLOSED', 'NO_ACCESS', 'NO_WASTE', 'CUSTOMER_REFUSED'].map(r =>
+    `<button class="reason" onclick="pickReason('${r}')">${svg(IC.ban, 26)}<span>${t(r)}</span></button>`).join('') +
+    `<p class="reason-note">${svg(IC.camera, 14)} A live photo of the site is required. The customer is asked to confirm within 24 h.</p>`;
+  $('#reasons-title').textContent = t('why');
+  $('#s-reasons').classList.remove('hidden');
+}
+function hideReasons() { $('#s-reasons').classList.add('hidden'); }
+function pickReason(r) { npuReason = r; hideReasons(); openCamera('npu'); }
+
+// ── LIVE CAMERA + ON-DEVICE STAMP (DRV-06) ───────────────────
+// No file input / gallery: getUserMedia only. Each frame is stamped with
+// date, time, GPS and the customer name before it leaves the phone.
+const cam = { stream: null, watch: null, fix: null, mode: null, shot: null };
+async function openCamera(mode) {
+  cam.mode = mode; cam.shot = null; cam.fix = null;
+  $('#s-cam').classList.remove('hidden');
+  $('#cam-review').classList.add('hidden');
+  $('#cam-live').classList.remove('hidden');
+  $('#cam-title').textContent = mode === 'npu' ? `${t('nopick')} · ${t(npuReason)}` : t('photo');
+  updateCamStatus();
+  if (navigator.geolocation) {
+    cam.watch = navigator.geolocation.watchPosition(p => { cam.fix = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) }; updateCamStatus(); },
+      () => updateCamStatus(), { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+  }
+  try {
+    cam.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } }, audio: false });
+    $('#cam-video').srcObject = cam.stream;
+    await $('#cam-video').play().catch(() => {});
+  } catch {
+    $('#cam-status').innerHTML = `<span class="bad">${t('camBlocked')}</span>`;
+    $('#cam-shutter').disabled = true;
+  }
+}
+function updateCamStatus() {
+  const f = cam.fix;
+  $('#cam-status').innerHTML = f ? `${svg(IC.pin, 14)} ${f.lat.toFixed(5)}, ${f.lng.toFixed(5)} · ±${f.acc} m` : `<span class="warn">${svg(IC.pin, 14)} ${t('waitingGps')}</span>`;
+  $('#cam-shutter').disabled = !f || !cam.stream;
+}
+function closeCamera() {
+  if (cam.stream) cam.stream.getTracks().forEach(tr => tr.stop());
+  if (cam.watch != null) navigator.geolocation.clearWatch(cam.watch);
+  cam.stream = null; cam.watch = null;
+  $('#s-cam').classList.add('hidden');
+}
+function pad(n) { return String(n).padStart(2, '0'); }
+function capture() {
+  const v = $('#cam-video'), f = cam.fix, j = currentJob;
+  if (!v.videoWidth || !f || !j) return;
+  const W = Math.min(1600, v.videoWidth), H = Math.round(v.videoHeight * W / v.videoWidth);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.drawImage(v, 0, 0, W, H);
+  const now = new Date();
+  const when = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  const lines = [`${j.name}${j.branch ? ' — ' + j.branch : ''}`, `${when}  ·  GPS ${f.lat.toFixed(6)}, ${f.lng.toFixed(6)} (±${f.acc} m)`,
+    `GreenLoop · ${cam.mode === 'npu' ? 'NOT PICKED UP: ' + npuReason.replace(/_/g, ' ') : (j.service_name || 'Service') + ' completed'} · job #${j.id}`];
+  const fs = Math.max(16, Math.round(W / 42)), band = fs * 1.55 * lines.length + fs;
+  g.fillStyle = 'rgba(4,34,29,.72)'; g.fillRect(0, H - band, W, band);
+  g.fillStyle = '#2dd4bf'; g.fillRect(0, H - band, 6, band);
+  g.fillStyle = '#fff'; g.textBaseline = 'top';
+  lines.forEach((l, i) => { g.font = `${i === 0 ? 700 : 500} ${fs}px system-ui, sans-serif`; g.fillText(l, fs, H - band + fs * 0.5 + i * fs * 1.55); });
+  cam.shot = { photo: c.toDataURL('image/jpeg', 0.82), lat: f.lat, lng: f.lng, photo_taken_at: now.toISOString(), stamp_text: lines.join(' | ') };
+  $('#cam-img').src = cam.shot.photo;
+  $('#cam-live').classList.add('hidden');
+  $('#cam-review').classList.remove('hidden');
+}
+function retake() { cam.shot = null; $('#cam-review').classList.add('hidden'); $('#cam-live').classList.remove('hidden'); }
+async function usePhoto() {
+  const shot = cam.shot, j = currentJob, mode = cam.mode;
+  if (!shot || !j) return;
+  closeCamera();
+  renderJobDetail(2);
+  const checklist = (j.checklist || []).filter((_, i) => checks[i]);
+  const payload = mode === 'npu'
+    ? { kind: 'cancel', pickupId: j.id, reason: npuReason, ...shot }
+    : { kind: 'complete', pickupId: j.id, checklist, ...shot };
+  const r = await sendOrQueue(payload);
+  if (r.status === 'rejected') {
+    renderJobDetail(1);
+    pushNotif('bad', 'Photo rejected', `${j.name}: ${r.problems.join('; ')}. Office notified — retake at the site.`);
+    return flashMsg(false, t('rejected'), r.problems.join('\n'), false);
+  }
+  if (mode === 'npu') {
+    j.status = 'canceled'; j.confirmation_status = 'awaiting';
+    pushNotif('bad', 'Not picked up reported', `${j.name} — ${t(npuReason)}`);
+    flashMsg(false, r.status === 'ok' ? t('reported') : t('saved'));
+  } else {
+    j.status = 'collected'; j.stage = 'completed';
+    renderJobDetail(4);
+    pushNotif('ok', 'Job completed', `${j.name} — ${r.status === 'ok' ? 'sent to office' : 'saved, will send automatically'}`);
+    flashMsg(true, r.status === 'ok' ? t('completed') : t('saved'));
+  }
+}
+
+function flashMsg(good, msg, detail = '', close = true) {
   const el = document.createElement('div');
   el.className = 'done-flash ' + (good ? 'ok' : 'bad');
-  el.innerHTML = `${svg(good ? IC.checkCircle : IC.xCircle, 96)}<span>${msg}</span>`;
+  el.innerHTML = `${svg(good ? IC.checkCircle : IC.xCircle, 96)}<span>${esc(msg)}</span>${detail ? `<small>${esc(detail)}</small>` : ''}`;
   document.body.appendChild(el);
-  setTimeout(() => { el.remove(); closeJob(); }, 1300);
+  setTimeout(() => { el.remove(); if (close) closeJob(); }, detail ? 3200 : 1300);
 }
 
 // ── HISTORY ──────────────────────────────────────────────────
@@ -357,7 +506,7 @@ async function renderHistory() {
   const nice = d => d === today ? 'Today' :
     new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
   $('#v-history').innerHTML = `
-    <div class="h-sec">Pickup history</div>
+    <div class="h-sec">${t('history')}</div>
     ${Object.entries(byDate).map(([date, list]) => `
       <div class="hist-date">${nice(date)}</div>
       ${list.map(r => `
@@ -398,13 +547,12 @@ async function renderAccount() {
     ${me.vehicle ? `<div class="inforow">${svg(IC.truck, 20)}<div><span class="lbl">Assigned vehicle</span><b>${esc(me.vehicle.fleet_number)}</b> · ${esc(me.vehicle.plate)} · ${esc(me.vehicle.zone)} zone</div></div>` : ''}
     <div class="inforow">${svg(IC.phone, 20)}<div><span class="lbl">Phone</span><b>${esc(me.phone || '—')}</b></div></div>
     <div class="inforow">${svg(IC.award, 20)}<div><span class="lbl">Career pickups completed</span><b>${me.stats.career_collected}</b></div></div>
+    <div class="h-sec">${svg(IC.globe, 13)} ${t('lang')}</div>
+    <div class="langs">${Object.entries(LANGS).map(([k, v]) => `<button class="${LANG === k ? 'on' : ''}" onclick="setLang('${k}')">${v}</button>`).join('')}</div>
     <button class="logoutbtn" onclick="logout()">${svg(IC.logout, 18)} Sign out</button>`;
 }
 
-// ── network layer with offline queue ─────────────────────────
-function fileToDataUrl(file) {
-  return new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(file); });
-}
+// ── network layer with offline queue ────────────────────────
 function dataUrlToBlob(u) {
   const [meta, b64] = u.split(',');
   const mime = meta.match(/:(.*?);/)[1];
@@ -413,56 +561,54 @@ function dataUrlToBlob(u) {
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
 }
-
+// returns {status:'ok'} | {status:'rejected', problems} ; throws on network/5xx (→ queue)
 async function transmit(p) {
-  if (p.kind === 'complete') {
-    const fd = new FormData();
-    fd.append('photo', dataUrlToBlob(p.photo), 'proof.jpg');
-    fd.append('lat', p.lat ?? ''); fd.append('lng', p.lng ?? ''); fd.append('client_ts', p.client_ts);
-    const res = await fetch(`${API}/pickups/${p.pickupId}/complete`, {
-      method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd,
-    });
-    return res.ok || res.status === 409;
-  }
-  const res = await fetch(`${API}/pickups/${p.pickupId}/cancel`, {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ reason: p.reason, lat: p.lat, lng: p.lng }),
+  const fd = new FormData();
+  fd.append('photo', dataUrlToBlob(p.photo), 'proof.jpg');
+  fd.append('lat', p.lat ?? ''); fd.append('lng', p.lng ?? '');
+  fd.append('photo_taken_at', p.photo_taken_at);
+  fd.append('device_now', new Date().toISOString()); // checked against server clock (±5 min)
+  fd.append('stamped', '1'); fd.append('stamp_text', p.stamp_text || ''); fd.append('source', 'camera');
+  if (p.kind === 'complete') fd.append('checklist', JSON.stringify(p.checklist || []));
+  else fd.append('reason', p.reason);
+  const res = await fetch(`${API}/pickups/${p.pickupId}/${p.kind === 'complete' ? 'complete' : 'cancel'}`, {
+    method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd,
   });
-  return res.ok || res.status === 409;
+  if (res.ok || res.status === 409) return { status: 'ok' };
+  if (res.status === 422 || res.status === 400 || res.status === 403 || res.status === 404) {
+    const b = await res.json().catch(() => ({}));
+    return { status: 'rejected', problems: b.problems || [b.error || 'Rejected by server'] };
+  }
+  throw new Error('HTTP ' + res.status);
 }
 
 function getQueue() { return JSON.parse(localStorage.getItem('gl_queue') || '[]'); }
 function setQueue(q) {
-  localStorage.setItem('gl_queue', JSON.stringify(q));
+  try { localStorage.setItem('gl_queue', JSON.stringify(q)); } catch { pushNotif('bad', 'Storage full', 'Could not save offline — reconnect to send.'); }
   $('#sync-banner').classList.toggle('hidden', q.length === 0);
   $('#sync-count').textContent = q.length;
 }
 async function sendOrQueue(payload) {
-  try {
-    if (await transmit(payload)) return true;
-    throw new Error('send failed');
-  } catch {
-    setQueue([...getQueue(), payload]);
-    return false;
-  }
+  try { return await transmit(payload); }
+  catch { setQueue([...getQueue(), payload]); return { status: 'queued' }; }
 }
-setInterval(async () => {
+async function flushQueue() {
   const q = getQueue();
   if (!q.length || !token) return;
   const remaining = [];
   for (const p of q) {
-    try { if (!(await transmit(p))) remaining.push(p); }
-    catch { remaining.push(p); }
+    try {
+      const r = await transmit(p);
+      if (r.status === 'rejected') pushNotif('bad', 'Saved photo rejected', `Job #${p.pickupId}: ${r.problems.join('; ')}`);
+    } catch { remaining.push(p); }
   }
   setQueue(remaining);
-  if (!remaining.length && q.length) pushNotif('ok', 'Back online', 'All saved pickups were sent to the office.');
-}, 60_000);
-
-window.addEventListener('online', () => $('#hdr-live')?.classList.remove('off'));
+  if (!remaining.length && q.length) pushNotif('ok', 'Back online', 'All saved jobs were sent to the office.');
+}
+setInterval(flushQueue, 60_000);
+window.addEventListener('online', () => { $('#hdr-live')?.classList.remove('off'); flushQueue(); });
 window.addEventListener('offline', () => $('#hdr-live')?.classList.add('off'));
 
-// close notification panel when tapping outside
 document.addEventListener('click', e => {
   const p = $('#notif-panel');
   if (!p.classList.contains('hidden') && !p.contains(e.target) && !e.target.closest('.bell')) p.classList.add('hidden');
@@ -471,63 +617,6 @@ document.addEventListener('click', e => {
 // ── boot ─────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 $('#login-date').textContent = fmtDate(new Date());
+applyLang();
 setQueue(getQueue());
 if (token && driver) enterApp();
-
-// --- AUTOMATED PATCH: DRIVER INTERFACE MEDIA STEPS & ALERTS ---
-(function() {
-    const audioChime = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-600.wav');
-    const driverStyles = document.createElement('style');
-    driverStyles.innerHTML = `
-        .camera-review-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:#0f172a; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:999999; padding:20px; }
-        .camera-preview-box { width:100%; max-width:360px; height:270px; background:#1e293b; border:2px solid #0d9488; border-radius:12px; margin-bottom:20px; display:flex; align-items:center; justify-content:center; color:#64748b; }
-        .review-action-row { display:flex; gap:16px; width:100%; max-width:360px; }
-        .btn-review-confirm { flex:1; background:#0d9488; color:#fff; border:none; padding:14px; border-radius:8px; font-weight:600; }
-        .btn-review-retry { flex:1; background:#334155; color:#f8fafc; border:1px solid #475569; padding:14px; border-radius:8px; font-weight:600; }
-    `;
-    document.head.appendChild(driverStyles);
-
-    window.addEventListener('message', (e) => {
-        if (e.data === 'route_changed') {
-            audioChime.play().catch(() => {});
-            if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-        }
-    });
-
-    document.addEventListener('click', async (e) => {
-        const btn = e.target.closest('#start-pickup-btn');
-        if (btn) {
-            const orderId = btn.dataset.orderId || "1";
-            const currentStatus = btn.dataset.status || "PENDING";
-            let nextStatus = "ACCEPTED";
-            if (currentStatus === "ACCEPTED") nextStatus = "IN_PROGRESS";
-            if (currentStatus === "IN_PROGRESS") {
-                if(!document.getElementById('driver-camera-overlay')) {
-                    const overlay = document.createElement('div');
-                    overlay.id = 'driver-camera-overlay';
-                    overlay.className = 'camera-review-overlay';
-                    overlay.innerHTML = `
-                        <h3 style="color:#fff;">📸 Image Verification Check</h3>
-                        <div class="camera-preview-box"><div>📄 waste_proof_${orderId}.jpg</div></div>
-                        <div class="review-action-row">
-                            <button class="btn-review-retry" id="retry-photo-btn">Recapture</button>
-                            <button class="btn-review-confirm" id="confirm-photo-btn">Confirm & Complete</button>
-                        </div>`;
-                    document.body.appendChild(overlay);
-                    document.getElementById('retry-photo-btn').onclick = () => overlay.remove();
-                    document.getElementById('confirm-photo-btn').onclick = async () => {
-                        const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
-                        await fetch(`/api/v1/pickups/${orderId}/step`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'PHOTO_UPLOADED', timestamp: ts }) });
-                        await fetch(`/api/v1/pickups/${orderId}/step`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'COMPLETED', timestamp: ts }) });
-                        overlay.remove();
-                        window.location.reload();
-                    };
-                }
-                return;
-            }
-            const ts = new Date().toISOString().replace('T', ' ').substring(0, 19);
-            await fetch(`/api/v1/pickups/${orderId}/step`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: nextStatus, timestamp: ts }) });
-            window.location.reload();
-        }
-    });
-})();

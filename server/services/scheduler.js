@@ -25,7 +25,8 @@ function generateMonth(year, month, { force = false } = {}) {
 
   const vehicles = q.all(`SELECT * FROM vehicles WHERE is_active = 1`);
   const drivers = q.all(`SELECT * FROM users WHERE role='driver' AND is_active=1`);
-  const customers = q.all(`SELECT * FROM customers WHERE is_active = 1`);
+  // customers on a recurring service plan are scheduled by the v3 recurrence engine instead
+  const customers = q.all(`SELECT * FROM customers WHERE is_active = 1 AND id NOT IN (SELECT customer_id FROM service_plans WHERE status='active')`);
   const dim = daysInMonth(year, month);
 
   // load[vehicleId][day] = stop count

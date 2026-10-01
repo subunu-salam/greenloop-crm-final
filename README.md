@@ -75,3 +75,30 @@ Expo / React Native version of the driver app — same API contract, installable
 `GET /reschedule/pending|options/:id` · `POST /reschedule/apply` ·
 `GET/POST/PUT /customers|users|vehicles` · `GET /reports/compliance|drivers|anomalies|ledger[?format=csv]` ·
 `GET /alerts` · `GET/PUT /settings` · Socket.IO events: `pickup:completed`, `pickup:canceled`, `alert`, `ledger:refresh`, `driver:queue-updated`
+
+---
+
+## v3 — PRD v1.0 implementation
+
+New server module: `server/v3.js` (schema migrations run automatically on start, SQLite only).
+
+**CRM** (glassmorphism theme, role-aware navigation): sales pipeline & lead kanban, quotation builder (5% VAT, versioning, WhatsApp share via `wa.me`, public accept link `/q/:token`, printable PDF), convert quote → customer (multi-site, plans, portal code), service catalogue, recurring service plans (daily / weekly / monthly nth-weekday, time windows, pause/resume), ad-hoc orders, booking requests, not-picked-up confirmations & disputes, invoices & payments with balances, customer 360 view with risk score, "clients needing attention", ops-staff role (blocked from billing/settings), audit log.
+
+**Driver app:** live camera only (no gallery), on-device stamp with date/time/GPS/customer, server rejects photos >150 m from site or with >5 min clock skew (CRM alert, override possible), not-picked-up flow with 4 reasons + mandatory photo, pest-control checklist, per-stop countdown & at-risk warning, Google Maps "Navigate" deep link (no Maps API cost), EN/HI/UR/AR, offline queue.
+
+**Customer app:** store code or OTP login, site switcher, today/live tracking, plans (change/pause/resume), one-off booking, invoices & balance, confirm/dispute missed visits within 24 h, quotations, notifications, filtered proof history + PDF report.
+
+**Background jobs (every 60 s):** nightly 14-day job generation (skips UAE holidays and paused dates, zone + capacity allocation with overflow, pest jobs only to pest-tagged vehicles), 17:00 day-before reminders, 24 h auto-confirm, at-risk alerts 30 min before window close.
+
+### Environment variables
+| Var | Default | Purpose |
+|---|---|---|
+| `OTP_DEV` | on | Returns the OTP in the API response (no SMS gateway yet). Set `OTP_DEV=0` in production once SMS/email is wired. |
+| `SEED_DEMO` | on | Seeds demo leads + a sent quotation. Set `0` to disable. |
+| `PROOF_RADIUS_M` | 150 | Max photo distance from site. |
+
+### Notes / open items
+- "PDFs" (quotes, invoices, history) are print-ready HTML pages — use the browser's Save as PDF.
+- The UAE holiday list for 2026 is approximate; edit it in CRM → Settings.
+- The Postgres mode (`db-pg.js`) does not support the v3 module.
+- Open PRD questions: SMS/email provider for OTP, payment gateway, final holiday calendar, VAT registration number on documents.

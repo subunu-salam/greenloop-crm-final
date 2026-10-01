@@ -9,6 +9,7 @@ const { mountTrackingRoutes } = require('./tracking-api');
 const { mountOpsFeatureRoutes } = require('./ops-features');
 const { mountAiRoutes } = require('./ai-api');
 const { mountPushRoutes } = require('./push-api');
+const v3 = require('./v3');
 const scheduler = require('./services/scheduler');
 const sla = require('./services/sla');
 
@@ -41,7 +42,11 @@ mountTrackingRoutes(apiRouter, io);
 mountOpsFeatureRoutes(apiRouter, io);
 mountAiRoutes(apiRouter);
 mountPushRoutes(apiRouter);
-app.use('/api/v1', apiRouter);
+v3.mountV3Routes(apiRouter, io);
+app.use('/api/v1', v3.guard, apiRouter);
+// public quotation link used in WhatsApp messages
+app.get('/q/:token', (req, res) => res.redirect('/api/v1/public/quotations/' + encodeURIComponent(req.params.token)));
+app.use(express.urlencoded({ extended: false }));
 
 app.use('/uploads', express.static(process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads')));
 app.use('/crm', express.static(path.join(__dirname, '..', 'public', 'crm')));
@@ -79,6 +84,7 @@ async function boot() {
   } else {
     const seeded = dbMod.seed();
     if (seeded) console.log('✔ Seeded SQLite demo');
+    require('./customer-api').seedPortalCodes();
   }
   try {
     require('./push');
@@ -95,6 +101,7 @@ async function boot() {
   }
   try {
     sla.start(io);
+    v3.start(io);
   } catch (e) {
     console.warn('SLA:', e.message);
   }

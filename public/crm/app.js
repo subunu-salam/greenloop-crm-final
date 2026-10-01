@@ -34,26 +34,59 @@ const PATHS = {
   file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+  funnel: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+  inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  fileText: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>',
+  repeat: '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+  wallet: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M16 12h2"/><path d="M2 9h20"/>',
+  tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  userCheck: '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  phone: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
+  mapPin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+  send: '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
 };
 const icon = (name, size = 16, cls = '') =>
   `<svg class="ic ${cls}" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${PATHS[name] || ''}</svg>`;
 const statusIcon = s => ({ collected: icon('checkCircle', 14), canceled: icon('xCircle', 14), pending: icon('clock', 14), overdue: icon('alertTriangle', 14), rescheduled: icon('swap', 14) }[s] || '');
 
+// [page, icon, label, roles] — roles: owner (admin) / ops
+let CRM_ROLE = 'owner';
 const NAV = [
+  ['Operations'],
   ['dashboard', 'grid', 'Dashboard'],
   ['ledger', 'list', 'Daily Route Ledger'],
   ['fleet', 'truck', 'Fleet Load Tracker'],
   ['reschedule', 'swap', 'Rescheduling'],
-  ['customers', 'store', 'Customers'],
-  ['users', 'users', 'Users'],
-  ['vehicles', 'truck', 'Vehicles'],
-  ['reports', 'chart', 'Reports'],
+  ['confirmations', 'userCheck', 'Not-picked-up'],
+  ['bookings', 'inbox', 'Bookings'],
   ['alerts', 'bell', 'Alerts'],
+  ['Sales'],
+  ['pipeline', 'funnel', 'Pipeline'],
+  ['leads', 'target', 'Leads'],
+  ['quotations', 'fileText', 'Quotations'],
+  ['Customers & billing'],
+  ['customers', 'store', 'Customers'],
+  ['plans', 'repeat', 'Service plans'],
+  ['invoices', 'wallet', 'Invoices & payments'],
+  ['Admin', 'owner'],
+  ['catalogue', 'tag', 'Service catalogue', 'owner'],
+  ['vehicles', 'truck', 'Vehicles', 'owner'],
+  ['users', 'users', 'Users', 'owner'],
+  ['reports', 'chart', 'Reports'],
+  ['audit', 'shield', 'Audit log', 'owner'],
+  ['settingsV3', 'settings', 'Settings', 'owner'],
 ];
+const canSee = roles => !roles || roles === CRM_ROLE;
 function buildNav() {
-  $('#nav').innerHTML = NAV.map(([page, ic, label]) =>
-    `<a data-page="${page}">${icon(ic, 17)} <span>${label}</span>${page === 'alerts' ? ' <span id="alert-badge" class="badge hidden">0</span>' : ''}</a>`).join('');
-  document.querySelectorAll('.sidebar nav a').forEach(a => a.addEventListener('click', () => nav(a.dataset.page)));
+  $('#nav').innerHTML = NAV.filter(n => canSee(n.length === 2 ? n[1] : n[3])).map(n => n.length <= 2
+    ? `<div class="nav-group">${n[0]}</div>`
+    : `<a data-page="${n[0]}" tabindex="0">${icon(n[1], 17)} <span>${n[2]}</span>${n[0] === 'alerts' ? ' <span id="alert-badge" class="badge hidden">0</span>' : ''}</a>`).join('');
+  document.querySelectorAll('.sidebar nav a').forEach(a => {
+    a.addEventListener('click', () => nav(a.dataset.page));
+    a.addEventListener('keydown', e => e.key === 'Enter' && nav(a.dataset.page));
+  });
 }
 
 async function api(path, opts = {}) {
@@ -89,8 +122,9 @@ function logout() {
 $('#login-pass').addEventListener('keydown', e => e.key === 'Enter' && doLogin());
 
 // ── shell / realtime ─────────────────────────────────────────
-function boot() {
+async function boot() {
   $('#login-screen').classList.add('hidden'); $('#app').classList.remove('hidden');
+  try { const me = await api('/me'); CRM_ROLE = me.crm_role === 'ops' ? 'ops' : 'owner'; $('#me-role').textContent = CRM_ROLE === 'ops' ? 'Ops staff' : 'Owner'; $('#me-name').textContent = me.name; } catch {}
   buildNav();
   socket = io();
   socket.on('connect', () => { $('#live-dot').classList.remove('off'); $('#live-label').textContent = 'live stream on'; });
@@ -99,7 +133,9 @@ function boot() {
   socket.on('pickup:canceled', d => { toast(`No pickup at ${d.customer}: ${d.reason.replace(/_/g,' ')} (${d.driver})`, 'warning'); refreshIf(['dashboard','ledger','reschedule']); });
   socket.on('pickup:ack', d => { toast(`${d.driver} started pickup at ${d.customer} (${d.branch})`); });
   socket.on('alert', d => { toast(d.message, d.severity); bumpBadge(); });
-  socket.on('ledger:refresh', () => refreshIf(['dashboard','ledger','fleet']));
+  socket.on('ledger:refresh', () => refreshIf(['dashboard','ledger','fleet','confirmations','plans']));
+  socket.on('lead:changed', () => refreshIf(['leads','pipeline','quotations']));
+  socket.emit('ops:join');
   nav('dashboard');
   refreshBadge();
 }
@@ -108,7 +144,9 @@ function refreshIf(pages) { if (pages.includes(currentPage)) nav(currentPage, tr
 function nav(page, silent) {
   currentPage = page;
   document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page));
-  ({ dashboard, ledger, fleet, reschedule, customers, users, vehicles, reports, alerts }[page])();
+  const fn = window[page];
+  if (typeof fn !== 'function') return;
+  Promise.resolve(fn()).catch(e => { $('#main').innerHTML = `<div class="card"><h3>Could not load this page</h3><p class="muted">${esc(e.message)}</p></div>`; });
 }
 
 function toast(msg, sev = 'info') {
@@ -122,13 +160,13 @@ async function refreshBadge() {
   try { const d = await api('/dashboard'); setBadge(d.unread_alerts); } catch {}
 }
 function setBadge(n) {
-  const b = $('#alert-badge');
+  const b = $('#alert-badge'); if (!b) return;
   b.textContent = n; b.classList.toggle('hidden', !n);
 }
-function bumpBadge() { const b = $('#alert-badge'); b.classList.remove('hidden'); b.textContent = (Number(b.textContent) || 0) + 1; }
+function bumpBadge() { const b = $('#alert-badge'); if (!b) return; b.classList.remove('hidden'); b.textContent = (Number(b.textContent) || 0) + 1; }
 
 // ── modal helpers ────────────────────────────────────────────
-function openModal(html) { $('#modal').innerHTML = html; $('#modal-wrap').classList.remove('hidden'); }
+function openModal(html, wide) { $('#modal').className = 'modal' + (wide ? ' wide' : ''); $('#modal').innerHTML = html; $('#modal-wrap').classList.remove('hidden'); }
 function closeModal() { $('#modal-wrap').classList.add('hidden'); }
 function field(label, inner) { return `<div class="field"><label>${label}</label>${inner}</div>`; }
 
@@ -188,9 +226,10 @@ function buckets(series, p) {
 async function dashboard() {
   killCharts();
   const w = periodWindow(dashPeriod);
-  const [d, s] = await Promise.all([
+  const [d, s, attn] = await Promise.all([
     api('/dashboard'),
     api(`/stats/overview?from=${w.from}&to=${w.to}`),
+    api('/attention').catch(() => []),
   ]);
   const t = s.totals;
   const doneable = (t.collected || 0) + (t.canceled || 0) + (t.overdue || 0);
@@ -199,7 +238,7 @@ async function dashboard() {
     `<button class="ptab ${dashPeriod === p ? 'on' : ''}" onclick="dashPeriod='${p}';dashboard()">${p[0].toUpperCase() + p.slice(1)}</button>`).join('');
 
   $('#main').innerHTML = `
-    <div class="row spread">
+    <div class="head">
       <div><h1>Operations Dashboard</h1>
       <p class="sub">${w.label} (${w.from === w.to ? w.from : w.from + ' → ' + w.to}) · shift cutoff ${d.shift_cutoff}</p></div>
       <div class="ptabs">${tabs}</div>
@@ -222,7 +261,12 @@ async function dashboard() {
       <div class="card"><h3>${icon('truck', 15)} By vehicle</h3><div class="chartbox"><canvas id="c-vehicle"></canvas></div></div>
     </div>
 
-    ${s.top_cancels.length ? `<div class="card"><h3>${icon('alertTriangle', 15)} Clients needing attention — repeated no-pickups</h3>
+    ${attn.length ? `<div class="card"><h3>${icon('alertTriangle', 15)} Clients needing attention</h3>
+      <p class="muted small" style="margin-bottom:8px">Three or more customer-confirmed no-pickups in the last 30 days.</p>
+      <table><tr><th>Client</th><th>Zone</th><th>Confirmed no-pickups</th><th></th></tr>
+      ${attn.map(r => `<tr><td><b>${esc(r.name)}</b> <span class="muted small">${esc(r.branch)}</span></td><td><span class="zone-tag">${esc(r.zone)}</span></td><td>${r.confirmed}</td>
+      <td><button class="btn ghost small" onclick="customer360(${r.id})">Open 360</button></td></tr>`).join('')}</table></div>` : ''}
+    ${s.top_cancels.length ? `<div class="card"><h3>${icon('alertTriangle', 15)} Repeated no-pickups in period</h3>
       <table><tr><th>Client</th><th>Zone</th><th>No-pickups in period</th></tr>
       ${s.top_cancels.map(r => `<tr><td><b>${esc(r.name)}</b> <span class="muted small">${esc(r.branch)}</span></td>
         <td><span class="zone-tag">${esc(r.zone)}</span></td><td>${r.cancels}</td></tr>`).join('')}</table>
@@ -247,7 +291,7 @@ async function dashboard() {
   const GREEN = '#22c55e', RED = '#f43f5e', AMBER = '#f59e0b', TEAL = '#14b8a6', BLUE = '#38bdf8', MUTED = css.getPropertyValue('--muted').trim();
   Chart.defaults.color = MUTED;
   Chart.defaults.borderColor = 'rgba(255,255,255,.07)';
-  Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
+  Chart.defaults.font.family = "'Manrope', 'Segoe UI', system-ui, sans-serif";
 
   const bk = buckets(s.series, dashPeriod);
   _charts.push(new Chart($('#c-trend'), {
@@ -299,20 +343,38 @@ async function ledger(dateArg) {
     <p class="sub">Chronological + geographic stop order per vehicle</p>
     <div class="row" style="margin-bottom:14px">
       <input type="date" id="ledger-date" value="${d.date}" style="width:170px" onchange="ledger(this.value)">
-      <button class="btn ghost small" onclick="genSchedule()">${icon('refresh', 13)} Generate month schedule</button>
+      ${CRM_ROLE === 'owner' ? `<button class="btn ghost small" onclick="genSchedule()">${icon('refresh', 13)} Generate month schedule</button>` : ''}
+      <button class="btn ghost small" onclick="genPlans()">${icon('repeat', 13)} Run recurring plans (14 days)</button>
+      <button class="btn primary small" onclick="adhocForm('${d.date}')">${icon('plus', 13)} Ad-hoc order</button>
+      <button class="btn ghost small" onclick="ledgerCsv('${d.date}')">${icon('download', 13)} CSV</button>
     </div>
     ${Object.entries(byVehicle).map(([veh, rows]) => `
       <div class="card"><h3>${icon('truck', 15)} ${veh} <span class="muted small">— ${rows.length} stops</span></h3>
-      <table><tr><th>#</th><th>Client</th><th>Zone</th><th>Driver</th><th>Status</th><th>Completed</th><th>Proof</th><th>GPS</th></tr>
+      <div class="scroll-x"><table><tr><th>#</th><th>Client</th><th>Service</th><th>Window</th><th>Driver</th><th>Status</th><th>Completed</th><th>Proof</th><th>GPS check</th></tr>
       ${rows.map(r => `<tr>
         <td>${r.seq}</td><td><b>${esc(r.name)}</b><br><span class="muted small">${esc(r.branch)}</span></td>
-        <td><span class="zone-tag">${esc(r.zone)}</span></td><td>${esc(r.driver || '—')}</td>
-        <td><span class="pill ${r.status}">${r.status}</span>${r.anomaly_reason ? '<br><span class="muted small">' + r.anomaly_reason.replace(/_/g,' ') + '</span>' : ''}</td>
+        <td><span class="pill ${r.category || 'waste'}">${esc(r.service_type || 'WASTE')}</span>${r.is_revisit ? ' <span class="pill rescheduled">revisit</span>' : ''}</td>
+        <td class="small">${esc(r.time_window || '—')}</td><td>${esc(r.driver || '—')}</td>
+        <td><span class="pill ${r.status}">${r.status}</span>${r.anomaly_reason ? '<br><span class="muted small">' + r.anomaly_reason.replace(/_/g,' ') + '</span>' : ''}${r.confirmation_status ? `<br><span class="pill ${r.confirmation_status}">${r.confirmation_status.replace('_', ' ')}</span>` : ''}</td>
         <td class="muted small">${(r.completed_at || '—').replace('T', ' ').slice(0, 16)}</td>
         <td>${r.photo_url ? `<img class="photo-thumb" src="${r.photo_url}" onclick="viewPhoto('${r.photo_url}')">` : '—'}</td>
-        <td class="muted small">${r.gps_lat ? r.gps_lat.toFixed(4) + ', ' + r.gps_lng.toFixed(4) : '—'}</td>
-      </tr>`).join('')}</table></div>`).join('') || '<div class="card"><p class="muted">No routes scheduled for this date.</p></div>'}`;
+        <td class="small">${proofCell(r)}</td>
+      </tr>`).join('')}</table></div></div>`).join('') || '<div class="card"><p class="muted">No routes scheduled for this date.</p></div>'}`;
 }
+function proofCell(r) {
+  let m = {}; try { m = JSON.parse(r.proof_meta || '{}'); } catch {}
+  if (m.overridden) return `<span class="pill Partly">override</span><br><span class="muted">${esc(m.override_reason || '')}</span>`;
+  if (m.rejected) return `<span class="pill canceled">rejected</span><br><span class="muted">${esc((m.problems || []).join('; '))}</span>`;
+  if (m.distance_m != null) return `<span class="pill collected">${m.distance_m} m</span>`;
+  return r.gps_lat ? `<span class="muted">${Number(r.gps_lat).toFixed(4)}, ${Number(r.gps_lng).toFixed(4)}</span>` : '—';
+}
+async function ledgerCsv(date) {
+  const d = await api('/ledger?date=' + date);
+  const cols = ['fleet_number', 'seq', 'name', 'branch', 'zone', 'service_type', 'time_window', 'driver', 'status', 'anomaly_reason', 'confirmation_status', 'completed_at', 'photo_url', 'gps_lat', 'gps_lng'];
+  const csv = [cols.join(','), ...d.rows.map(r => cols.map(c => `"${String(r[c] ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = `ledger_${date}.csv`; a.click();
+}
+async function genPlans() { const r = await api('/service-plans/generate', { method: 'POST' }); toast(`Recurring plans: ${r.created} new jobs, ${r.skipped} holiday skips${r.unallocated ? ', ' + r.unallocated + ' unallocated' : ''}`); nav('ledger'); }
 async function genSchedule() {
   const r = await api('/schedule/generate', { method: 'POST', body: {} });
   toast(r.skipped ? `Schedule already exists (${r.existing} pickups)` : `Generated ${r.created} pickups`);
@@ -396,7 +458,7 @@ async function customers() {
       <td>${r.collected_this_month}/${r.frequency}</td>
       <td class="muted small">${esc(r.contact_phone)}</td>
       <td>${r.is_active ? '<span class="pill collected">active</span>' : '<span class="pill canceled">inactive</span>'}</td>
-      <td><button class="btn ghost small" onclick='customerForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'>Edit</button></td>
+      <td class="row" style="gap:6px;flex-wrap:nowrap"><button class="btn primary small" onclick="customer360(${r.id})">360</button><button class="btn ghost small" onclick='customerForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'>Edit</button></td>
     </tr>`).join('')}</table></div>`;
 }
 async function importCsv(input) {
@@ -450,12 +512,12 @@ async function users() {
   window._vehCache = vehicles;
   $('#main').innerHTML = `
     <h1>User Management</h1>
-    <p class="sub">Create drivers (4-digit PIN login) and admins (username + password)</p>
+    <p class="sub">Drivers sign in with a 4-digit PIN; owners and ops staff with username and password. Ops staff can't see users, settings, vehicles or billing actions.</p>
     <div class="row" style="margin-bottom:12px"><button class="btn primary" onclick="userForm()">${icon('plus', 13)} Add user</button></div>
     <div class="card"><table>
     <tr><th>Name</th><th>Role</th><th>Login</th><th>Vehicle</th><th>Phone</th><th>Status</th><th></th></tr>
     ${rows.map(r => `<tr>
-      <td><b>${esc(r.full_name)}</b></td><td>${r.role}</td>
+      <td><b>${esc(r.full_name)}</b></td><td>${r.role === 'admin' ? (r.crm_role === 'ops' ? '<span class="role-chip">Ops staff</span>' : 'Owner / admin') : 'Driver'}</td>
       <td class="muted small">${r.role === 'admin' ? esc(r.username) : 'PIN ••••'}</td>
       <td>${esc(r.fleet_number || '—')}</td><td class="muted small">${esc(r.phone)}</td>
       <td>${r.is_active ? '<span class="pill collected">active</span>' : '<span class="pill canceled">disabled</span>'}</td>
@@ -468,7 +530,7 @@ function userForm(u = {}) {
   openModal(`
     <h3>${u.id ? 'Edit' : 'Add'} user</h3>
     ${field('Full name', `<input id="u-name" value="${esc(u.full_name || '')}">`)}
-    ${u.id ? '' : field('Role', `<select id="u-role" onchange="document.querySelectorAll('.drv-only').forEach(e=>e.style.display=this.value==='driver'?'':'none');document.querySelectorAll('.adm-only').forEach(e=>e.style.display=this.value==='admin'?'':'none')"><option value="driver">Driver</option><option value="admin">Admin</option></select>`)}
+    ${u.id ? '' : field('Role', `<select id="u-role" onchange="document.querySelectorAll('.drv-only').forEach(e=>e.style.display=this.value==='driver'?'':'none');document.querySelectorAll('.adm-only').forEach(e=>e.style.display=this.value!=='driver'?'':'none')"><option value="driver">Driver</option><option value="admin">Owner / admin</option><option value="ops">Ops staff</option></select>`)}
     <div class="drv-only" style="${u.id && u.role !== 'driver' ? 'display:none' : ''}">
       ${field(u.id ? 'New 4-digit PIN (leave blank to keep)' : '4-digit PIN', `<input id="u-pin" maxlength="4" inputmode="numeric" placeholder="e.g. 4321">`)}
       ${field('Assigned vehicle', `<select id="u-veh"><option value="">— none —</option>${vehOpts}</select>`)}
@@ -478,23 +540,27 @@ function userForm(u = {}) {
       ${field(u.id ? 'New password (leave blank to keep)' : 'Password', `<input id="u-password" type="password">`)}
     </div>
     ${field('Phone', `<input id="u-phone" value="${esc(u.phone || '')}">`)}
+    ${u.id && u.role === 'admin' ? field('CRM role', `<select id="u-crm"><option value="owner" ${u.crm_role !== 'ops' ? 'selected' : ''}>Owner / admin — full control</option><option value="ops" ${u.crm_role === 'ops' ? 'selected' : ''}>Ops staff — leads, quotes, ledger, rescheduling</option></select>`) : ''}
     ${u.id ? field('Active', `<select id="u-active"><option value="1" ${u.is_active ? 'selected' : ''}>Yes</option><option value="0" ${!u.is_active ? 'selected' : ''}>No</option></select>`) : ''}
     <div class="row"><button class="btn primary full" onclick="saveUser(${u.id || 'null'}, '${u.role || ''}')">Save</button></div>
     <p id="m-err" class="err"></p>`);
 }
 async function saveUser(id, existingRole) {
-  const role = id ? existingRole : $('#u-role').value;
+  const picked = id ? existingRole : $('#u-role').value;
+  const role = picked === 'ops' ? 'admin' : picked;
   const body = { full_name: $('#u-name').value, role, phone: $('#u-phone').value };
   if (role === 'driver') {
     if ($('#u-pin').value) body.pin = $('#u-pin').value;
     body.vehicle_id = $('#u-veh').value ? Number($('#u-veh').value) : null;
   } else {
     if (!id) body.username = $('#u-username').value;
+    if (!id && picked === 'ops') body.role = 'ops';
     if ($('#u-password') && $('#u-password').value) body.password = $('#u-password').value;
   }
   if (id) body.is_active = $('#u-active').value === '1';
   try {
     await api(id ? '/users/' + id : '/users', { method: id ? 'PUT' : 'POST', body });
+    if (id && $('#u-crm')) await api(`/users/${id}/crm-role`, { method: 'PUT', body: { crm_role: $('#u-crm').value } });
     closeModal(); toast('User saved'); nav('users');
   } catch (e) { $('#m-err').textContent = e.message; }
 }
@@ -507,10 +573,11 @@ async function vehicles() {
     <p class="sub">Onboard a new truck and the next route generation rebalances all loads automatically (PRD §3.4)</p>
     <div class="row" style="margin-bottom:12px"><button class="btn primary" onclick="vehicleForm()">${icon('plus', 13)} Onboard vehicle</button></div>
     <div class="card"><table>
-    <tr><th>Fleet #</th><th>Plate</th><th>Primary zone</th><th>Max daily stops</th><th>Status</th><th></th></tr>
+    <tr><th>Fleet #</th><th>Plate</th><th>Primary zone</th><th>Max daily stops</th><th>Services</th><th>Status</th><th></th></tr>
     ${rows.map(r => `<tr>
       <td><b>${esc(r.fleet_number)}</b></td><td>${esc(r.plate)}</td>
       <td><span class="zone-tag">${esc(r.zone)}</span></td><td>${r.max_daily_capacity}</td>
+      <td>${String(r.service_tags || 'waste').split(',').map(t => `<span class="pill ${t}">${t}</span>`).join(' ')}</td>
       <td>${r.is_active ? '<span class="pill collected">active</span>' : '<span class="pill canceled">parked</span>'}</td>
       <td><button class="btn ghost small" onclick='vehicleForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'>Edit</button></td>
     </tr>`).join('')}</table></div>`;
@@ -522,6 +589,7 @@ function vehicleForm(v = {}) {
     ${field('License plate', `<input id="v-plate" value="${esc(v.plate || '')}">`)}
     ${field('Primary zone', `<input id="v-zone" value="${esc(v.zone || '')}" placeholder="e.g. Downtown">`)}
     ${field('Max daily pickups', `<input id="v-cap" type="number" value="${v.max_daily_capacity ?? 15}">`)}
+    ${field('Service types this vehicle can take', `<div class="daypick"><label><input type="checkbox" id="v-t-waste" ${String(v.service_tags || 'waste').includes('waste') ? 'checked' : ''}> Waste (Machari)</label><label><input type="checkbox" id="v-t-pest" ${String(v.service_tags || '').includes('pest') ? 'checked' : ''}> Pest control</label></div>`)}
     ${v.id ? field('Active', `<select id="v-active"><option value="1" ${v.is_active ? 'selected' : ''}>Yes</option><option value="0" ${!v.is_active ? 'selected' : ''}>No</option></select>`) : ''}
     <div class="row"><button class="btn primary full" onclick="saveVehicle(${v.id || 'null'})">Save</button></div>
     <p id="m-err" class="err"></p>`);
@@ -530,7 +598,9 @@ async function saveVehicle(id) {
   const body = { fleet_number: $('#v-fleet').value, plate: $('#v-plate').value, zone: $('#v-zone').value, max_daily_capacity: Number($('#v-cap').value) };
   if (id) body.is_active = $('#v-active').value === '1';
   try {
-    await api(id ? '/vehicles/' + id : '/vehicles', { method: id ? 'PUT' : 'POST', body });
+    const vr = await api(id ? '/vehicles/' + id : '/vehicles', { method: id ? 'PUT' : 'POST', body });
+    const tags = [$('#v-t-waste').checked && 'waste', $('#v-t-pest').checked && 'pest'].filter(Boolean);
+    if (tags.length) await api(`/vehicles/${id || vr.id}/tags`, { method: 'PUT', body: { service_tags: tags } });
     closeModal(); toast('Vehicle saved — will join the next route generation'); nav('vehicles');
   } catch (e) { $('#m-err').textContent = e.message; }
 }
@@ -592,175 +662,14 @@ async function alerts() {
     <p class="sub">SLA breaches, anomalies, reschedules and system events</p>
     <div class="row" style="margin-bottom:12px"><button class="btn ghost small" onclick="readAll()">Mark all read</button></div>
     ${rows.map(a => `<div class="alert-item ${a.severity}">
-      <b>${a.type.replace(/_/g, ' ')}</b> ${a.is_read ? '' : '<span class="badge">new</span>'}<br>${esc(a.message)}
+      <div class="row spread"><b>${a.type.replace(/_/g, ' ')}</b> ${a.is_read ? '' : '<span class="badge" style="margin-left:0">new</span>'}</div>${esc(a.message)}
+      ${a.type === 'PHOTO_REJECTED' && a.pickup_id ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="proofOverride(${a.pickup_id})">${icon('shield', 13)} Ops override…</button></div>` : ''}
+      ${a.type === 'BOOKING' ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="nav('bookings')">Open bookings</button></div>` : ''}
+      ${a.type === 'QUOTE_ACCEPTED' ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="nav('quotations')">Open quotations</button></div>` : ''}
+      ${a.type === 'DISPUTE' ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="nav('confirmations')">Open not-picked-up</button></div>` : ''}
       <div class="t">${a.created_at}</div></div>`).join('') || '<div class="card"><p class="muted">No alerts.</p></div>'}`;
 }
 async function readAll() { await api('/alerts/read-all', { method: 'POST' }); setBadge(0); nav('alerts'); }
 
 // ── boot on load if token cached ─────────────────────────────
 if (token) boot();
-
-// --- AUTOMATED PATCH: UNIFIED OPERATIONS HUB CONTROLLER [V8] ---
-(function() {
-    const styles = document.createElement('style');
-    styles.innerHTML = `
-        .adhoc-modal-backdrop { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(11, 19, 26, 0.85); display:none; align-items:center; justify-content:center; z-index:99999; font-family: sans-serif; backdrop-filter: blur(4px); }
-        .adhoc-modal-window { background:#111c24; border: 1px solid #233544; padding:24px; border-radius:8px; width:400px; color:#f8fafc; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); }
-        .adhoc-modal-title { font-size:18px; font-weight:700; margin-bottom:18px; color:#f8fafc; display:flex; justify-content:space-between; align-items:center; }
-        .adhoc-form-group { margin-bottom:16px; }
-        .adhoc-form-group label { display:block; font-size:11px; color:#64748b; margin-bottom:6px; text-transform:uppercase; font-weight:700; }
-        .adhoc-form-group input, .adhoc-form-group select { width:100%; padding:10px 12px; background:#1e293b; border:1px solid #334155; border-radius:6px; color:#f8fafc; box-sizing: border-box; }
-        .adhoc-submit-btn { background:#0d9488; color:#ffffff; border:none; padding:12px; border-radius:6px; font-weight:600; cursor:pointer; width:100%; margin-top:10px; }
-        .btn-ledger-adhoc { background:#1e293b; color:#f8fafc; border:1px solid #475569; padding:6px 14px; border-radius:6px; font-weight:500; cursor:pointer; margin-left:12px; height:34px; vertical-align: middle; }
-        .btn-resched-adhoc { background:#0d9488; color:#ffffff; border:none; padding:8px 16px; border-radius:6px; font-weight:600; cursor:pointer; float: right; margin-top: -4px; }
-        .fleet-matrix-wrapper { width: 100% !important; display: flex; flex-direction: column; gap: 20px; box-sizing: border-box; margin-top: 24px; }
-        .fleet-card-container { background: #111c24; border: 1px solid #233544; border-radius: 12px; padding: 24px; width: 100% !important; box-sizing: border-box; border-left: 4px solid #0d9488; }
-        .fleet-meta-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #1e293b; padding-bottom: 12px; }
-        .utilization-track-rail { background: #0f172a; border-radius: 20px; height: 14px; width: 100%; position: relative; overflow: hidden; margin-top: 8px; border: 1px solid #233544; }
-        .utilization-fill-bar { height: 100%; border-radius: 20px; }
-        .util-low { background: linear-gradient(90deg, #0f766e, #14b8a6); }
-        .fleet-stats-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; margin-top: 20px; width: 100%; }
-        .day-util-chip { background: #1e293b; border: 1px solid #233544; padding: 12px 8px; border-radius: 8px; text-align: center; }
-        .day-util-date { font-size: 11px; color: #64748b; margin-bottom: 6px; font-weight: 700; text-transform: uppercase; }
-        .day-util-pct { font-size: 14px; font-weight: 800; color: #f8fafc; }
-    `;
-    document.head.appendChild(styles);
-
-    function createAdHocModal() {
-        if(document.getElementById('adhoc-pickup-modal')) return;
-        const modalHtml = document.createElement('div');
-        modalHtml.id = 'adhoc-pickup-modal';
-        modalHtml.className = 'adhoc-modal-backdrop';
-        modalHtml.innerHTML = `
-            <div class="adhoc-modal-window">
-                <div class="adhoc-modal-title"><span style="color:#14b8a6">✦ Add Ad-hoc Pickup</span><span style="cursor:pointer;color:#64748b;font-size:24px;line-height:1;" id="close-adhoc-modal">×</span></div>
-                <form id="adhoc-pickup-form">
-                    <div class="adhoc-form-group"><label>Target Client Profile</label>
-                        <select id="adhoc-client" required>
-                            <option value="City Grocer">City Grocer</option><option value="Day2Day">Day2Day</option><option value="Quick Stop">Quick Stop</option>
-                            <option value="Fresh Basket">Fresh Basket</option><option value="Al Noor Foods">Al Noor Foods</option><option value="Star Supermarket">Star Supermarket</option>
-                        </select>
-                    </div>
-                    <div class="adhoc-form-group"><label>Branch Reference Name</label><input type="text" id="adhoc-branch" value="Branch 1" required /></div>
-                    <div class="adhoc-form-group"><label>Operational Area Zone</label>
-                        <select id="adhoc-zone"><option value="Deira">Deira</option><option value="Marina">Marina</option><option value="Downtown">Downtown</option></select>
-                    </div>
-                    <div class="adhoc-form-group"><label>Assigned Logistics Fleet</label>
-                        <select id="adhoc-truck">
-                            <option value="Ali Hassan">TRUCK-01 (Ali Hassan)</option><option value="Ramesh Kumar">TRUCK-02 (Ramesh Kumar)</option>
-                        </select>
-                    </div>
-                    <div class="adhoc-form-group"><label>Scheduled Fulfillment Date</label><input type="date" id="adhoc-date" required /></div>
-                    <button type="submit" class="adhoc-submit-btn">Dispatch to Fleet Matrix</button>
-                </form>
-            </div>`;
-        document.body.appendChild(modalHtml);
-        document.getElementById('close-adhoc-modal').onclick = () => document.getElementById('adhoc-pickup-modal').style.display = 'none';
-    }
-
-    function hookAsynchronousForm() {
-        const form = document.getElementById('adhoc-pickup-form');
-        if (form && !form.dataset.hooked) {
-            form.dataset.hooked = "true";
-            form.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const selectedDate = document.getElementById('adhoc-date').value;
-                const payload = {
-                    clientName: document.getElementById('adhoc-client').value,
-                    branch: document.getElementById('adhoc-branch').value,
-                    zone: document.getElementById('adhoc-zone').value,
-                    driverName: document.getElementById('adhoc-truck').value,
-                    date: selectedDate
-                };
-                
-                const response = await fetch('/api/v1/pickups/manual', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                
-                if (response.ok) {
-                    document.getElementById('adhoc-pickup-modal').style.display = 'none';
-                    alert('Ad-hoc stop safely injected into active daily routes!');
-                    localStorage.setItem('greenloop_preserve_date', selectedDate);
-                    window.location.reload();
-                }
-            });
-        }
-    }
-
-    function overhaulFleetLoadInterface() {
-        const trackerContainer = document.querySelector('.active-fleet-tracker-view, #fleet-tracker-section') || 
-                                 Array.from(document.querySelectorAll('div, section')).find(el => el.innerText && el.innerText.includes('7-day utilisation'));
-        if (trackerContainer) {
-            Array.from(trackerContainer.children).forEach(child => {
-                if(child.id !== 'overhauled-tracker-grid' && !child.innerText.includes('Active Fleet')) child.style.display = 'none';
-            });
-            if (document.getElementById('overhauled-tracker-grid')) return;
-
-            const fleetData = [
-                { truck: "TRUCK-01", territory: "Deira", reg: "DXB A 71214", metrics: [ {d:"07-06", s:3}, {d:"07-07", s:2}, {d:"07-08", s:2}, {d:"07-09", s:1}, {d:"07-10", s:2}, {d:"07-11", s:2}, {d:"07-12", s:2} ]},
-                { truck: "TRUCK-02", territory: "Marina", reg: "DXB B 33482", metrics: [ {d:"07-06", s:2}, {d:"07-07", s:2}, {d:"07-08", s:0}, {d:"07-09", s:0}, {d:"07-10", s:1}, {d:"07-11", s:2}, {d:"07-12", s:2} ]}
-            ];
-
-            const gridShell = document.createElement('div');
-            gridShell.id = 'overhauled-tracker-grid';
-            gridShell.className = 'fleet-matrix-wrapper';
-            fleetData.forEach(f => {
-                const totalStops = f.metrics.reduce((a, b) => a + b.s, 0);
-                const totalPct = Math.round((totalStops / 105) * 100);
-                const card = document.createElement('div');
-                card.className = 'fleet-card-container';
-                card.innerHTML = `
-                    <div class="fleet-meta-header">
-                        <div style="font-size: 16px; font-weight:700; color:#f8fafc;">🚚 ${f.truck} <span style="font-size:11px; background:#1e293b; padding:4px 10px; border-radius:12px; color:#94a3b8;">${f.territory} · ${f.reg}</span></div>
-                        <div style="font-size:14px; font-weight:700; color:#14b8a6;">${totalPct}% Weekly Capacity Engaged</div>
-                    </div>
-                    <div class="utilization-track-rail"><div class="utilization-fill-bar util-low" style="width: ${totalPct}%"></div></div>
-                    <div class="fleet-stats-grid">
-                        ${f.metrics.map(m => `<div class="day-util-chip"><div class="day-util-date">${m.d}</div><div class="day-util-pct">${m.s}/15</div></div>`).join('')}
-                    </div>`;
-                gridShell.appendChild(card);
-            });
-            trackerContainer.appendChild(gridShell);
-        }
-    }
-
-    setInterval(() => {
-        createAdHocModal();
-        hookAsynchronousForm();
-        overhaulFleetLoadInterface();
-        
-        const dateInput = document.getElementById('adhoc-date');
-        if(dateInput) {
-            const todayStr = new Date().toISOString().split('T')[0];
-            dateInput.setAttribute('min', todayStr);
-            if(!dateInput.value) dateInput.value = localStorage.getItem('greenloop_preserve_date') || todayStr;
-        }
-
-        const activeDatePicker = document.querySelector('input[type="date"]:not(#adhoc-date)');
-        const savedDate = localStorage.getItem('greenloop_preserve_date');
-        if(activeDatePicker && savedDate && activeDatePicker.value !== savedDate) {
-            activeDatePicker.value = savedDate;
-            localStorage.removeItem('greenloop_preserve_date');
-            activeDatePicker.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-
-        const genMonthBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText && b.innerText.includes('Generate month schedule'));
-        if (genMonthBtn && !document.getElementById('ledger-adhoc-btn')) {
-            const btn = document.createElement('button');
-            btn.id = 'ledger-adhoc-btn'; btn.className = 'btn-ledger-adhoc'; btn.type = 'button'; btn.innerText = '+ Ad-hoc Pickup';
-            btn.onclick = () => document.getElementById('adhoc-pickup-modal').style.display = 'flex';
-            genMonthBtn.parentNode.insertBefore(btn, genMonthBtn.nextSibling);
-        }
-
-        const reschedHeader = Array.from(document.querySelectorAll('h1, h2, h3, div')).find(el => !el.closest('.sidebar') && el.innerText?.trim() === 'Intelligent Rescheduling');
-        if (reschedHeader && !document.getElementById('resched-adhoc-btn')) {
-            reschedHeader.style.position = 'relative'; reschedHeader.style.width = '100%';
-            const btn = document.createElement('button');
-            btn.id = 'resched-adhoc-btn'; btn.className = 'btn-resched-adhoc'; btn.type = 'button'; btn.innerText = '+ Extra Emergency Stop';
-            btn.onclick = () => document.getElementById('adhoc-pickup-modal').style.display = 'flex';
-            reschedHeader.appendChild(btn);
-        }
-    }, 350);
-})();
