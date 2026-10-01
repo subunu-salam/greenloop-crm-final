@@ -11,6 +11,7 @@ const { q, getSetting, setSetting } = require('./db');
 const scheduler = require('./services/scheduler');
 const rescheduler = require('./services/rescheduler');
 const sla = require('./services/sla');
+const v3 = require('./v3');
 
 const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
@@ -25,7 +26,7 @@ const upload = multer({
 });
 
 function sign(user) {
-  return jwt.sign({ id: user.id, role: user.role, name: user.full_name, vehicle_id: user.vehicle_id || null },
+  return jwt.sign({ id: user.id, role: user.role, crm_role: user.role === 'admin' ? (user.crm_role || 'owner') : undefined, name: user.full_name, vehicle_id: user.vehicle_id || null },
     SECRET, { expiresIn: '14h' });
 }
 function auth(role) {
@@ -61,7 +62,7 @@ module.exports = function buildApi(io) {
     const user = q.get(`SELECT * FROM users WHERE role='admin' AND username=? AND is_active=1`, String(username || ''));
     if (!user || !bcrypt.compareSync(String(password || ''), user.password_hash))
       return res.status(401).json({ error: 'Invalid credentials' });
-    res.json({ token: sign(user), user: { id: user.id, name: user.full_name } });
+    res.json({ token: sign(user), user: { id: user.id, name: user.full_name, crm_role: user.crm_role || 'owner' } });
   });
 
   // ── DRIVER APP ──────────────────────────────────────────────
@@ -84,6 +85,7 @@ module.exports = function buildApi(io) {
     q.run(`UPDATE pickups SET stage='acknowledged', updated_at=datetime('now') WHERE id=?`, p.id);
     const info = q.get(`SELECT c.name, c.branch FROM pickups p JOIN customers c ON c.id=p.customer_id WHERE p.id=?`, p.id);
     io.emit('pickup:ack', { id: p.id, customer: info.name, branch: info.branch, driver: req.user.name });
+    try { v3.notifyCustomer(p.customer_id, 'on_way', 'Driver on the way', `${req.user.name} has started your visit at ${info.name} ${info.branch || ''}`); } catch {}
     res.json({ ok: true, stage: 'acknowledged' });
   });
 
@@ -116,43 +118,61 @@ module.exports = function buildApi(io) {
     });
   });
 
+  // DRV-06/07: live-camera proof only; server validates GPS distance, device clock and on-device stamp
   r.post('/pickups/:id/complete', auth('driver'), upload.single('photo'), (req, res) => {
     const p = q.get(`SELECT * FROM pickups WHERE id=?`, req.params.id);
-    if (!p) return res.status(404).json({ error: 'Not found' });
-    if (['collected', 'canceled', 'rescheduled'].includes(p.status))
-      return res.status(409).json({ error: `Already ${p.status}` });
+    const drop = () => { if (req.file) fs.unlink(req.file.path, () => {}); };
+    if (!p) { drop(); return res.status(404).json({ error: 'Not found' }); }
+    if (p.driver_id && p.driver_id !== req.user.id) { drop(); return res.status(403).json({ error: 'Not your job' }); }
+    if (['collected', 'canceled', 'rescheduled'].includes(p.status)) { drop(); return res.status(409).json({ error: `Already ${p.status}` }); }
     if (!req.file) return res.status(400).json({ error: 'Verification photo is required' });
-    const { lat, lng, client_ts } = req.body;
+    const check = v3.validateProof(p, req.body || {});
+    if (!check.ok) {
+      v3.rejectProof(p, check, req.user.name, 'complete');
+      q.run(`UPDATE pickups SET photo_url=? WHERE id=?`, `/uploads/${req.file.filename}`, p.id); // keep for ops review
+      return res.status(422).json({ error: 'Photo rejected', problems: check.problems, rejected: true });
+    }
+    const checklist = (() => { try { return JSON.parse(req.body.checklist || '[]'); } catch { return []; } })();
     const ts = new Date().toISOString();
-    q.run(`UPDATE pickups SET stage='completed' WHERE id=?`, p.id);
-    q.run(`UPDATE pickups SET status='collected', completed_at=?, photo_url=?, gps_lat=?, gps_lng=?,
-           notes = COALESCE(notes,'') || CASE WHEN ? != '' THEN ' [device ts: ' || ? || ']' ELSE '' END,
-           updated_at=datetime('now') WHERE id=?`,
-      ts, `/uploads/${req.file.filename}`, Number(lat) || null, Number(lng) || null,
-      client_ts || '', client_ts || '', p.id);
+    q.run(`UPDATE pickups SET status='collected', stage='completed', completed_at=?, photo_url=?, gps_lat=?, gps_lng=?, photo_taken_at=?,
+           proof_meta=?, checklist=?, updated_at=datetime('now') WHERE id=?`,
+      ts, `/uploads/${req.file.filename}`, Number(req.body.lat), Number(req.body.lng), req.body.photo_taken_at || null,
+      JSON.stringify(check.meta), JSON.stringify(checklist), p.id);
     const info = q.get(`SELECT c.name, c.branch, v.fleet_number FROM pickups p
       JOIN customers c ON c.id=p.customer_id LEFT JOIN vehicles v ON v.id=p.vehicle_id WHERE p.id=?`, p.id);
     io.emit('pickup:completed', { id: p.id, customer: info.name, branch: info.branch, vehicle: info.fleet_number, photo_url: `/uploads/${req.file.filename}`, at: ts, driver: req.user.name });
-    res.json({ ok: true, status: 'collected', at: ts });
+    io.to('customer:' + p.customer_id).emit('pickup:completed', { id: p.id });
+    try { v3.onPickupCompleted(p.id); } catch (e) { console.warn('onPickupCompleted', e.message); }
+    res.json({ ok: true, status: 'collected', at: ts, distance_m: check.distance_m });
   });
 
-  r.post('/pickups/:id/cancel', auth('driver'), (req, res) => {
-    const REASONS = ['BIN_EMPTY', 'ACCESS_BLOCKED', 'MANAGER_REFUSED'];
-    const { reason, lat, lng } = req.body || {};
-    if (!REASONS.includes(reason)) return res.status(400).json({ error: 'Invalid reason' });
+  // "Not picked up": reason + live GPS photo → Awaiting customer confirmation (PRD §7)
+  const NPU_REASONS = ['CLOSED', 'NO_ACCESS', 'NO_WASTE', 'CUSTOMER_REFUSED', 'BIN_EMPTY', 'ACCESS_BLOCKED', 'MANAGER_REFUSED'];
+  r.post('/pickups/:id/cancel', auth('driver'), upload.single('photo'), (req, res) => {
+    const drop = () => { if (req.file) fs.unlink(req.file.path, () => {}); };
+    const { reason } = req.body || {};
+    if (!NPU_REASONS.includes(reason)) { drop(); return res.status(400).json({ error: 'Invalid reason' }); }
     const p = q.get(`SELECT * FROM pickups WHERE id=?`, req.params.id);
-    if (!p) return res.status(404).json({ error: 'Not found' });
-    if (['collected', 'canceled', 'rescheduled'].includes(p.status))
-      return res.status(409).json({ error: `Already ${p.status}` });
-    q.run(`UPDATE pickups SET status='canceled', anomaly_reason=?, gps_lat=?, gps_lng=?,
+    if (!p) { drop(); return res.status(404).json({ error: 'Not found' }); }
+    if (p.driver_id && p.driver_id !== req.user.id) { drop(); return res.status(403).json({ error: 'Not your job' }); }
+    if (['collected', 'canceled', 'rescheduled'].includes(p.status)) { drop(); return res.status(409).json({ error: `Already ${p.status}` }); }
+    if (!req.file) return res.status(400).json({ error: 'A live photo of the site is required' });
+    const check = v3.validateProof(p, req.body || {});
+    if (!check.ok) {
+      v3.rejectProof(p, check, req.user.name, 'not_picked_up');
+      drop();
+      return res.status(422).json({ error: 'Photo rejected', problems: check.problems, rejected: true });
+    }
+    q.run(`UPDATE pickups SET status='canceled', anomaly_reason=?, gps_lat=?, gps_lng=?, photo_url=?, photo_taken_at=?, proof_meta=?,
            completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?`,
-      reason, Number(lat) || null, Number(lng) || null, p.id);
+      reason, Number(req.body.lat), Number(req.body.lng), `/uploads/${req.file.filename}`, req.body.photo_taken_at || null, JSON.stringify(check.meta), p.id);
+    v3.onNotPickedUp(p.id);
     const info = q.get(`SELECT c.name, c.branch FROM pickups p JOIN customers c ON c.id=p.customer_id WHERE p.id=?`, p.id);
-    const msg = `NO PICKUP: ${info.name} (${info.branch}) — ${reason.replace(/_/g, ' ')} (by ${req.user.name})`;
+    const msg = `NOT PICKED UP: ${info.name} (${info.branch}) — ${reason.replace(/_/g, ' ')} (by ${req.user.name}) · awaiting customer confirmation`;
     q.run(`INSERT INTO alerts(type,severity,message,pickup_id) VALUES ('ANOMALY','warning',?,?)`, msg, p.id);
     io.emit('pickup:canceled', { id: p.id, customer: info.name, branch: info.branch, reason, driver: req.user.name });
     io.emit('alert', { type: 'ANOMALY', severity: 'warning', message: msg, pickup_id: p.id });
-    res.json({ ok: true, status: 'canceled' });
+    res.json({ ok: true, status: 'canceled', confirmation_status: 'awaiting' });
   });
 
   // ── DASHBOARD ───────────────────────────────────────────────
@@ -309,11 +329,13 @@ module.exports = function buildApi(io) {
 
   // ── USERS CRUD (create / edit credentials) ──────────────────
   r.get('/users', auth('admin'), (req, res) => {
-    res.json(q.all(`SELECT u.id,u.full_name,u.role,u.username,u.phone,u.vehicle_id,u.is_active,u.created_at,
+    res.json(q.all(`SELECT u.id,u.full_name,u.role,u.crm_role,u.username,u.phone,u.vehicle_id,u.is_active,u.created_at,
       v.fleet_number FROM users u LEFT JOIN vehicles v ON v.id=u.vehicle_id ORDER BY u.role, u.full_name`));
   });
   r.post('/users', auth('admin'), (req, res) => {
-    const { full_name, role, pin, username, password, phone, vehicle_id } = req.body || {};
+    let { full_name, role, pin, username, password, phone, vehicle_id } = req.body || {};
+    const crmRole = role === 'ops' ? 'ops' : 'owner';
+    if (role === 'ops') role = 'admin';
     if (!full_name || !['driver', 'admin'].includes(role)) return res.status(400).json({ error: 'full_name and valid role required' });
     if (role === 'driver' && !/^\d{4}$/.test(String(pin || ''))) return res.status(400).json({ error: 'Driver needs a 4-digit PIN' });
     if (role === 'admin' && (!username || !password)) return res.status(400).json({ error: 'Admin needs username + password' });
@@ -322,8 +344,9 @@ module.exports = function buildApi(io) {
         .some(u => bcrypt.compareSync(String(pin), u.pin_hash));
       if (clash) return res.status(409).json({ error: 'PIN already in use — choose another' });
     }
-    const info = q.run(`INSERT INTO users(full_name,role,username,password_hash,pin_hash,phone,vehicle_id) VALUES (?,?,?,?,?,?,?)`,
-      full_name, role, username || null, password ? bcrypt.hashSync(password, 10) : null,
+    if (role === 'admin' && q.get(`SELECT id FROM users WHERE username=?`, username)) return res.status(409).json({ error: 'Username taken' });
+    const info = q.run(`INSERT INTO users(full_name,role,crm_role,username,password_hash,pin_hash,phone,vehicle_id) VALUES (?,?,?,?,?,?,?,?)`,
+      full_name, role, role === 'admin' ? crmRole : null, username || null, password ? bcrypt.hashSync(password, 10) : null,
       pin ? bcrypt.hashSync(String(pin), 10) : null, phone || '', vehicle_id || null);
     res.json({ ok: true, id: Number(info.lastInsertRowid) });
   });
@@ -383,6 +406,8 @@ module.exports = function buildApi(io) {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
     const rows = q.all(
       `SELECT p.id, p.seq, p.status, p.completed_at, p.photo_url, p.anomaly_reason, p.gps_lat, p.gps_lng, p.notes,
+              p.service_type, p.time_window, p.confirmation_status, p.proof_meta, p.is_revisit,
+              (SELECT category FROM service_types st WHERE st.code=p.service_type) AS category,
               c.name, c.branch, c.zone, v.fleet_number, u.full_name AS driver
        FROM pickups p
        JOIN customers c ON c.id=p.customer_id
@@ -412,6 +437,7 @@ module.exports = function buildApi(io) {
       `SELECT p.id, p.scheduled_date, p.status, p.anomaly_reason, c.name, c.branch, c.zone, v.fleet_number
        FROM pickups p JOIN customers c ON c.id=p.customer_id LEFT JOIN vehicles v ON v.id=p.vehicle_id
        WHERE p.status IN ('canceled','overdue')
+         AND COALESCE(p.confirmation_status,'') NOT IN ('awaiting','confirmed','auto_confirmed','disputed')
          AND p.id NOT IN (SELECT pickup_id FROM alerts WHERE type='RESCHEDULED' AND pickup_id IS NOT NULL)
        ORDER BY p.scheduled_date DESC LIMIT 50`));
   });

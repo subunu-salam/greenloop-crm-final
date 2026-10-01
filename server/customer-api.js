@@ -27,26 +27,26 @@ function authCustomer(req, res, next) {
   }
 }
 
+// Give demo codes 1001-1003 to the first 3 customers that have none.
+// Called at mount AND again after DB seeding (fresh installs seed later).
+function seedPortalCodes() {
+  try {
+    const first = q.all(`SELECT id, portal_code_hash h FROM customers WHERE is_active=1 ORDER BY id LIMIT 3`);
+    let n = 0;
+    ['1001', '1002', '1003'].forEach((code, i) => {
+      if (first[i] && !first[i].h) { q.run(`UPDATE customers SET portal_code_hash=? WHERE id=?`, bcrypt.hashSync(code, 10), first[i].id); n++; }
+    });
+    if (n) console.log('✔ Customer demo codes ready: 1001 1002 1003');
+  } catch (e) { console.warn('Customer portal seed:', e.message); }
+}
+
 function mountCustomerRoutes(r, io) {
   // Ensure portal_code column exists
-  Promise.resolve(q.run(`ALTER TABLE customers ADD COLUMN portal_code_hash TEXT`)).catch(() => {
+  Promise.resolve().then(() => q.run(`ALTER TABLE customers ADD COLUMN portal_code_hash TEXT`)).catch(() => {
     /* already exists */
   });
 
-  // Seed demo portal codes for first 3 customers if missing
-  Promise.resolve(
-    q.all(
-      `SELECT id FROM customers WHERE is_active=1 AND (portal_code_hash IS NULL OR portal_code_hash='') ORDER BY id LIMIT 3`
-    )
-  )
-    .then((need) => {
-      const codes = ['1001', '1002', '1003'];
-      need.forEach((c, i) => {
-        if (codes[i])
-          q.run(`UPDATE customers SET portal_code_hash=? WHERE id=?`, bcrypt.hashSync(codes[i], 10), c.id);
-      });
-    })
-    .catch((e) => console.warn('Customer portal seed:', e.message));
+  seedPortalCodes();
 
   r.post('/auth/customer-login', (req, res) => {
     const code = String((req.body || {}).code || '');
@@ -190,4 +190,4 @@ function mountCustomerRoutes(r, io) {
   });
 }
 
-module.exports = { mountCustomerRoutes, authCustomer };
+module.exports = { seedPortalCodes, mountCustomerRoutes, authCustomer };

@@ -13,7 +13,7 @@ try {
 const ARRIVE_RADIUS_M = 100;
 
 function ensureColumns() {
-  Promise.resolve(q.run(`ALTER TABLE customers ADD COLUMN access_notes TEXT`)).catch(() => {});
+  Promise.resolve().then(() => q.run(`ALTER TABLE customers ADD COLUMN access_notes TEXT`)).catch(() => {});
 }
 
 function auth(role) {
