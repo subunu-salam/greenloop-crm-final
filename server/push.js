@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { q, isPg } = require('./db');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
 
 function ensureVapid() {

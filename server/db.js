@@ -88,7 +88,15 @@ CREATE TABLE IF NOT EXISTS settings (
   const q = {
     all: (sql, ...p) => db.prepare(sql).all(...p),
     get: (sql, ...p) => db.prepare(sql).get(...p),
-    run: (sql, ...p) => db.prepare(sql).run(...p),
+    run: (sql, ...p) => {
+      try { return db.prepare(sql).run(...p); }
+      catch (e) {
+        /* "ADD COLUMN" migrations run on every start; after the first start the
+           column already exists. Treat that as done instead of crashing. */
+        if (/duplicate column name/i.test(e.message) && /^\s*ALTER\s+TABLE/i.test(sql)) return { changes: 0 };
+        throw e;
+      }
+    },
   };
 
   function getSetting(key, fallback) {
