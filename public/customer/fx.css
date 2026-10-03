@@ -1,0 +1,164 @@
+/* GreenLoop FX layer — deeper glass, glowing edges, motion & micro-interactions.
+   Visual only: loaded after each app's styles.css, keeps the existing teal/green palette.
+   Shared by CRM, driver and customer (identical copy in each app folder). */
+
+:root {
+  --fx-glow: 45, 212, 191;              /* teal */
+  --fx-glow2: 110, 231, 183;            /* mint */
+  --fx-ease: cubic-bezier(.2, .8, .2, 1);
+  --fx-spring: cubic-bezier(.34, 1.56, .64, 1);
+  --fx-blur: blur(26px) saturate(170%);
+  --fx-glass: linear-gradient(145deg, rgba(255,255,255,.11), rgba(255,255,255,.035) 55%, rgba(255,255,255,.06));
+  --fx-edge: rgba(255,255,255,.14);
+  --fx-shadow: 0 18px 50px -18px rgba(0,0,0,.65), 0 2px 6px -2px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.16), inset 0 -1px 0 rgba(255,255,255,.03);
+}
+
+/* ---------- living background: same teal/green mesh, slowly drifting orbs ---------- */
+body { position: relative; overflow-x: hidden; }
+body::before, body::after {
+  content: ''; position: fixed; z-index: -1; pointer-events: none; border-radius: 50%; filter: blur(70px); opacity: .55;
+}
+body::before { width: 46vmax; height: 46vmax; left: -12vmax; top: -14vmax;
+  background: radial-gradient(circle, rgba(var(--fx-glow), .45), transparent 65%); animation: fxDrift1 26s ease-in-out infinite alternate; }
+body::after { width: 40vmax; height: 40vmax; right: -14vmax; bottom: -16vmax;
+  background: radial-gradient(circle, rgba(var(--fx-glow2), .32), transparent 65%); animation: fxDrift2 32s ease-in-out infinite alternate; }
+@keyframes fxDrift1 { to { transform: translate(14vmax, 10vmax) scale(1.12); } }
+@keyframes fxDrift2 { to { transform: translate(-12vmax, -8vmax) scale(1.1); } }
+
+/* ---------- deeper frosted glass with glowing edge ---------- */
+.glass, .card, .kpi, .login-card, .sidebar, .modal, .ptabs, .lane, .alert-item, .opt-card, .lead-card, .hero360,
+.sumcard, .job-card, .jobmeta, .stepper, .reason, .hist-item, .acct-hero, .stat, .inforow, .notif-panel, .checklist,
+.hero-card, .visit, .plan, .inv, .quote, .alert, .g-item, .form, .sheet, .appbar, .tabbar, .seg {
+  background-image: var(--fx-glass);
+  backdrop-filter: var(--fx-blur); -webkit-backdrop-filter: var(--fx-blur);
+  border-color: var(--fx-edge);
+  box-shadow: var(--fx-shadow);
+}
+/* light-catching rim: thin gradient border via mask (no layout change) */
+.card, .kpi, .login-card, .lane, .opt-card, .hero360, .sumcard, .job-card, .acct-hero, .stat,
+.hero-card, .visit, .plan, .inv, .quote, .g-item, .form {
+  position: relative; isolation: isolate;
+}
+.card::before, .kpi::before, .login-card::before, .lane::before, .opt-card::before, .hero360::before,
+.sumcard::before, .job-card::before, .acct-hero::before, .stat::before,
+.hero-card::before, .visit::before, .plan::before, .inv::before, .quote::before, .g-item::before, .form::before {
+  content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none; z-index: 1;
+  background: linear-gradient(135deg, rgba(var(--fx-glow), .55), rgba(255,255,255,.08) 35%, rgba(255,255,255,.02) 60%, rgba(var(--fx-glow2), .35));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+          mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  opacity: .55; transition: opacity .35s var(--fx-ease);
+}
+
+/* ---------- hover lift + glow ---------- */
+@media (hover: hover) {
+  .card, .kpi, .lane, .opt-card, .lead-card, .alert-item, .job-card, .hist-item, .stat,
+  .hero-card, .visit, .plan, .inv, .quote, .g-item {
+    transition: transform .35s var(--fx-ease), box-shadow .35s var(--fx-ease), border-color .35s;
+  }
+  .card:hover, .kpi:hover, .opt-card:hover, .lead-card:hover, .alert-item:hover, .job-card:hover, .hist-item:hover, .stat:hover,
+  .hero-card:hover, .visit:hover, .plan:hover, .inv:hover, .quote:hover, .g-item:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 26px 60px -20px rgba(0,0,0,.7), 0 0 0 1px rgba(var(--fx-glow), .25), 0 0 34px -6px rgba(var(--fx-glow), .35), inset 0 1px 0 rgba(255,255,255,.2);
+  }
+  .card:hover::before, .kpi:hover::before, .opt-card:hover::before, .job-card:hover::before, .stat:hover::before,
+  .hero-card:hover::before, .visit:hover::before, .plan:hover::before, .inv:hover::before, .quote:hover::before, .g-item:hover::before { opacity: 1; }
+  /* tables: card stays put, rows highlight */
+  .card:has(table):hover { transform: none; }
+  tbody tr { transition: background .2s; }
+  tbody tr:hover { background: rgba(var(--fx-glow), .07); }
+}
+
+/* cursor spotlight on cards (position set by fx.js) */
+.fx-spot { background-image: radial-gradient(420px circle at var(--mx, 50%) var(--my, 50%), rgba(var(--fx-glow), .13), transparent 45%), var(--fx-glass) !important; }
+
+/* ---------- KPI cards: glow orb + shimmer ---------- */
+.kpi { overflow: hidden; }
+.kpi::after { opacity: .16 !important; filter: blur(22px) !important; transition: transform .6s var(--fx-ease), opacity .4s; }
+.kpi:hover::after { transform: scale(1.35); opacity: .26 !important; }
+.kpi .num, .stat .n, .giant, .sumcount { text-shadow: 0 0 22px currentColor; }
+.kpi .num { background: linear-gradient(180deg, #fff 10%, currentColor 120%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.kpi:not(.green):not(.red):not(.amber):not(.blue):not(.violet) .num { -webkit-text-fill-color: currentColor; }
+
+/* ---------- buttons & controls: micro-interactions ---------- */
+.btn, .wide-btn, .qbtn, button.primary, .btn.primary, .tab, .seg button, .pad button, .ptab, .site-btn, .row-btn, .chip {
+  transition: transform .18s var(--fx-spring), box-shadow .25s, background .25s, filter .2s !important;
+}
+.btn:active, .wide-btn:active, .qbtn:active, .pad button:active, .tab:active, .ptab:active, .row-btn:active, .chip:active { transform: scale(.95); }
+@media (hover: hover) {
+  .btn:hover, .wide-btn:hover, .qbtn:hover { transform: translateY(-1px); filter: brightness(1.08); }
+  .btn.primary:hover, .btn.wa:hover, .wide-btn.go:hover { box-shadow: 0 8px 26px -6px rgba(var(--fx-glow), .65); }
+}
+.btn.primary, .wide-btn.go, .btn.primary.full { position: relative; overflow: hidden; }
+.btn.primary::after, .wide-btn.go::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.35) 50%, transparent 70%);
+  transform: translateX(-120%); transition: transform .8s var(--fx-ease);
+}
+.btn.primary:hover::after, .wide-btn.go:hover::after { transform: translateX(120%); }
+/* ripple (spawned by fx.js) */
+.fx-ripple { position: absolute; border-radius: 50%; pointer-events: none; transform: scale(0); background: rgba(255,255,255,.35); animation: fxRipple .6s var(--fx-ease) forwards; }
+@keyframes fxRipple { to { transform: scale(2.6); opacity: 0; } }
+
+input, select, textarea { transition: border-color .2s, box-shadow .25s, background .2s; }
+input:focus, select:focus, textarea:focus { box-shadow: 0 0 0 4px rgba(var(--fx-glow), .16), 0 0 22px -6px rgba(var(--fx-glow), .5); }
+
+/* navigation */
+.sidebar nav a { transition: background .25s, color .2s, transform .25s var(--fx-ease), box-shadow .25s; position: relative; }
+.sidebar nav a:hover { transform: translateX(3px); }
+.sidebar nav a.active { box-shadow: inset 0 0 0 1px rgba(var(--fx-glow), .45), 0 0 24px -8px rgba(var(--fx-glow), .7); }
+.sidebar nav a.active::before { content: ''; position: absolute; left: -2px; top: 22%; bottom: 22%; width: 3px; border-radius: 3px; background: rgb(var(--fx-glow)); box-shadow: 0 0 10px rgb(var(--fx-glow)); }
+.tab.on, .seg button.on, .ptab.on, .ptab.active { box-shadow: 0 0 22px -6px rgba(var(--fx-glow), .6); }
+.tab svg { transition: transform .3s var(--fx-spring); }
+.tab.on svg { transform: translateY(-2px) scale(1.12); filter: drop-shadow(0 0 6px rgba(var(--fx-glow), .8)); }
+
+/* badges & live dots */
+.badge, .bell-badge { animation: fxPop .5s var(--fx-spring) both, fxGlowPulse 2.4s ease-in-out infinite 1s; }
+@keyframes fxGlowPulse { 50% { box-shadow: 0 0 0 5px rgba(244,63,94,.18); } }
+.livedot, .dot { box-shadow: 0 0 10px currentColor; }
+
+/* pills */
+.pill { transition: transform .2s var(--fx-spring); }
+.pill:hover { transform: scale(1.06); }
+
+/* progress / load bars fill smoothly */
+.progressbar i, .loadbar i, .bar i { transition: width 1s var(--fx-ease); box-shadow: 0 0 14px rgba(var(--fx-glow), .6); }
+.fx-play .progressbar i, .fx-play .loadbar i, .fx-play .bar i { animation: fxGrow 1.1s var(--fx-ease) both .2s; }
+@keyframes fxGrow { from { width: 0; } }
+
+/* ---------- page & card transitions ---------- */
+.fx-in { animation: fxIn .6s var(--fx-ease) both; animation-delay: var(--fx-d, 0ms); }
+@keyframes fxIn { from { opacity: 0; transform: translateY(16px) scale(.985); filter: blur(4px); } to { opacity: 1; transform: none; filter: none; } }
+.fx-page { animation: fxPage .45s var(--fx-ease) both; }
+@keyframes fxPage { from { opacity: 0; transform: translateY(10px); } }
+@keyframes fxPop { from { transform: scale(.4); opacity: 0; } }
+
+.modal, .sheet, .notif-panel, .login-card, .login-panel { animation: fxModal .45s var(--fx-spring) both; }
+@keyframes fxModal { from { opacity: 0; transform: translateY(18px) scale(.96); } }
+.toast, .toasts > * { animation: fxToast .45s var(--fx-spring) both; }
+@keyframes fxToast { from { opacity: 0; transform: translateY(14px) scale(.9); } }
+
+/* skeleton shimmer for loading states */
+.skel, .loading { background: linear-gradient(90deg, rgba(255,255,255,.05), rgba(255,255,255,.13), rgba(255,255,255,.05)); background-size: 200% 100%; animation: fxShimmer 1.3s linear infinite; }
+@keyframes fxShimmer { to { background-position: -200% 0; } }
+
+/* charts: sit directly on the card (no nested panel) */
+.chartbox { background: transparent !important; background-image: none !important; border: 0 !important; box-shadow: none !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+.chartbox canvas, canvas { filter: drop-shadow(0 6px 18px rgba(var(--fx-glow), .12)); }
+
+/* nicer scrollbars */
+* { scrollbar-width: thin; scrollbar-color: rgba(var(--fx-glow), .35) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(var(--fx-glow), .3); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(var(--fx-glow), .5); }
+
+/* ---------- responsive ---------- */
+@media (max-width: 760px) {
+  :root { --fx-blur: blur(18px) saturate(160%); }       /* lighter on phones */
+  body::before, body::after { filter: blur(50px); opacity: .45; }
+  .kpi .num { font-size: 26px; }
+}
+
+/* accessibility */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
