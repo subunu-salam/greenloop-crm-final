@@ -286,7 +286,7 @@ function applyQueue() {
     const j = jobs.find(x => x.id === p.pickupId); if (!j) continue;
     if (p.kind === 'arrive' && !j.arrived_at) { j.arrived_at = p.photo_taken_at; j.started_at = j.started_at || p.photo_taken_at; j.arrival_local = p.photo; j.pending_sync = true; }
     if (p.kind === 'finish') { j.status = 'collected'; j.stage = 'completed'; j.pending_sync = true; }
-    if (p.kind === 'issue') { j.status = 'canceled'; j.confirmation_status = 'awaiting'; j.pending_sync = true; }
+    if (p.kind === 'issue' || p.kind === 'cancel') { j.status = 'canceled'; j.confirmation_status = 'awaiting'; j.pending_sync = true; }
   }
 }
 const serverNow = () => Date.now() + clockOffsetMs;
@@ -424,7 +424,8 @@ function renderJobDetail(forceStep) {
     A.innerHTML = `
       <div class="jobtimer">${svg(IC.nav, 18)}<span>${t('onWay')}</span>${j.started_at ? timer(j.started_at) : ''}</div>
       ${j.maps_url ? `<a class="giant blue" href="${esc(j.maps_url)}" target="_blank" rel="noopener">${svg(IC.nav)}<span>${t('navigate').toUpperCase()}</span></a>` : ''}
-      <button class="giant green" onclick="openCamera('arrive')">${svg(IC.camera)}<span>${t('arrivePhoto')}</span><small>${t('arriveSub')}</small></button>`;
+      <button class="giant green" onclick="openCamera('arrive')">${svg(IC.camera)}<span>${t('arrivePhoto')}</span><small>${t('arriveSub')}</small></button>
+      <button class="giant red" onclick="showReasons()">${svg(IC.ban)}<span>${t('nopick')}</span></button>`;
   } else if (s === 2) {
     const pic = j.arrival_local || j.arrival_photo_url;
     A.innerHTML = `
@@ -469,14 +470,18 @@ async function finishJob() {
 }
 
 // STEP 3 · Report: an issue. Reason only; the arrival photo already shows the site.
+let npuReason = null;
 function showReasons() {
+  const arrived = currentJob && jobSteps(currentJob) === 2;
   $('#reasons-body').innerHTML = ['CLOSED', 'NO_ACCESS', 'NO_WASTE', 'CUSTOMER_REFUSED'].map(r =>
-    `<button class="reason" onclick="reportIssue('${r}')">${svg(IC.ban, 26)}<span>${t(r)}</span></button>`).join('') +
-    `<p class="reason-note">${svg(IC.camera, 14)} ${t('usesArrival')}</p>`;
+    `<button class="reason" onclick="${arrived ? 'reportIssue' : 'pickReason'}('${r}')">${svg(IC.ban, 26)}<span>${t(r)}</span></button>`).join('') +
+    `<p class="reason-note">${svg(IC.camera, 14)} ${arrived ? t('usesArrival') : 'A live photo of the site is required. The customer is asked to confirm within 24 h.'}</p>`;
   $('#reasons-title').textContent = t('why');
   $('#s-reasons').classList.remove('hidden');
 }
 function hideReasons() { $('#s-reasons').classList.add('hidden'); }
+// Not picked up without an arrival photo (as before v3.3): reason, then a live GPS photo
+function pickReason(r) { npuReason = r; hideReasons(); openCamera('npu'); }
 async function reportIssue(reason) {
   const j = currentJob; if (!j) return;
   hideReasons();
@@ -499,7 +504,7 @@ async function openCamera(mode) {
   $('#s-cam').classList.remove('hidden');
   $('#cam-review').classList.add('hidden');
   $('#cam-live').classList.remove('hidden');
-  $('#cam-title').textContent = t('camArrive');
+  $('#cam-title').textContent = mode === 'npu' ? `${t('nopick')} · ${t(npuReason)}` : t('camArrive');
   updateCamStatus();
   if (navigator.geolocation) {
     cam.watch = navigator.geolocation.watchPosition(p => { cam.fix = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) }; updateCamStatus(); },
@@ -536,7 +541,7 @@ function capture() {
   const now = new Date();
   const when = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
   const lines = [`${j.name}${j.branch ? ' — ' + j.branch : ''}`, `${when}  ·  GPS ${f.lat.toFixed(6)}, ${f.lng.toFixed(6)} (±${f.acc} m)`,
-    `GreenLoop · Arrived on site · ${j.service_name || 'Service'} · job #${j.id}`];
+    `GreenLoop · ${cam.mode === 'npu' ? 'NOT PICKED UP: ' + npuReason.replace(/_/g, ' ') : 'Arrived on site · ' + (j.service_name || 'Service')} · job #${j.id}`];
   const fs = Math.max(16, Math.round(W / 42)), band = fs * 1.55 * lines.length + fs;
   g.fillStyle = 'rgba(4,34,29,.72)'; g.fillRect(0, H - band, W, band);
   g.fillStyle = '#2dd4bf'; g.fillRect(0, H - band, 6, band);
@@ -550,15 +555,22 @@ function capture() {
 function retake() { cam.shot = null; $('#cam-review').classList.add('hidden'); $('#cam-live').classList.remove('hidden'); }
 // STEP 2 · Arrival: the GPS-stamped photo goes to the office, which checks it against the site.
 async function usePhoto() {
-  const shot = cam.shot, j = currentJob;
+  const shot = cam.shot, j = currentJob, mode = cam.mode;
   if (!shot || !j) return;
   closeCamera();
   renderJobDetail(3);
-  const r = await sendOrQueue({ kind: 'arrive', pickupId: j.id, ...shot });
+  const r = await sendOrQueue(mode === 'npu' ? { kind: 'cancel', pickupId: j.id, reason: npuReason, ...shot } : { kind: 'arrive', pickupId: j.id, ...shot });
   if (r.status === 'rejected') {
     renderJobDetail();
     pushNotif('bad', 'Photo rejected', `${j.name}: ${r.problems.join('; ')}. Office notified — retake at the site.`);
     return flashMsg(false, t('rejected'), r.problems.join('\n'), false);
+  }
+  if (mode === 'npu') {
+    j.status = 'canceled'; j.confirmation_status = 'awaiting';
+    saveJobs();
+    if (typeof loadShift === 'function') loadShift();
+    pushNotif('bad', 'Not picked up reported', `${j.name} — ${t(npuReason)}`, true);
+    return flashMsg(false, r.status === 'ok' ? t('reported') : t('saved'));
   }
   j.stage = 'arrived';
   j.arrived_at = shot.photo_taken_at; j.started_at = j.started_at || shot.photo_taken_at;
