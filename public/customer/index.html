@@ -20,8 +20,12 @@
   </div>
   <div class="seg"><button id="lm-code" class="on" onclick="loginMode('code')">Store code</button><button id="lm-otp" onclick="loginMode('otp')">Phone / email</button></div>
   <div id="login-code" class="login-panel">
-    <p class="hint">Enter your 4-digit store code</p>
-    <div class="pin-dots" id="pin-dots"><i></i><i></i><i></i><i></i></div>
+    <div class="glass form" style="margin-bottom:14px">
+      <label for="login-phone">Mobile number on your account</label>
+      <input id="login-phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="050 123 4567">
+    </div>
+    <p class="hint">Then enter your store code</p>
+    <div class="pin-dots" id="pin-dots"><i></i><i></i><i></i><i></i><i></i><i></i></div>
     <div class="pad">
       <button onclick="pinKey(1)">1</button><button onclick="pinKey(2)">2</button><button onclick="pinKey(3)">3</button>
       <button onclick="pinKey(4)">4</button><button onclick="pinKey(5)">5</button><button onclick="pinKey(6)">6</button>
@@ -29,7 +33,8 @@
       <button class="pad-ghost" aria-hidden="true"></button><button onclick="pinKey(0)">0</button>
       <button class="pad-del" onclick="pinDel()" aria-label="Delete">⌫</button>
     </div>
-    <p class="demo">Demo codes: <b>1001</b> · <b>1002</b> · <b>1003</b></p>
+    <button class="btn primary full" id="code-go" onclick="doLogin()" disabled>Sign in</button>
+    <p class="demo">Demo: mobile <b>050 000 1001</b> + code <b>1001</b> (also …1002, …1003)</p>
   </div>
   <div id="login-otp" class="login-panel hidden">
     <div class="glass form">

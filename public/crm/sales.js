@@ -218,12 +218,25 @@ async function leadDetail(id) {
 async function leadStage(id, stage) { await api('/leads/' + id, { method: 'PUT', body: { stage } }); toast('Stage updated'); leadDetail(id); if (currentPage === 'leads') leads(); }
 
 // ═══════════════════ QUOTATIONS (CRM-10/11/12) ═══════════════
+// Gmail connection notice shown wherever quotations are sent from
+function mailBanner(m) {
+  if (!m) return '';
+  return m.configured
+    ? `<div class="banner ok">${icon('mail', 16)}<div>Gmail connected — quotations are emailed from <b>${esc(m.sender || 'your Gmail account')}</b> (${m.mode === 'api' ? 'Gmail API' : 'Gmail SMTP'}).</div></div>`
+    : `<div class="banner">${icon('mail', 16)}<div><b>Gmail is not connected on the server yet.</b> “Send via Gmail” opens a ready-written Gmail message for you to press Send. To send automatically, add a Gmail account in the server settings (see README → Gmail).</div></div>`;
+}
 async function quotations() {
-  const rows = await api('/quotations');
+  const [rows, mail] = await Promise.all([api('/quotations'), api('/mail/status').catch(() => null)]);
   const open = rows.filter(q => ['draft', 'sent'].includes(q.status));
   $('#main').innerHTML = `
-    <div class="head"><div><h1>Quotations</h1><p class="sub">Numbered, versioned quotes with VAT 5%. Share by WhatsApp link or PDF; convert accepted quotes in one click.</p></div>
+    <div class="head"><div><h1>Quotations</h1><p class="sub">Numbered, versioned quotes with VAT 5%. Sent by Gmail with a view / PDF / accept link; accepted quotes convert to a registered customer in one click.</p></div>
       <button class="btn primary" onclick="pickLeadForQuote()">${icon('plus', 13)} New quotation</button></div>
+    <div class="flow">
+      <div class="flow-step"><span class="n">1</span><span class="cnt">${rows.filter(q => q.status === 'draft').length}</span><span class="k">Step 1</span><b>Send quotation via Gmail</b><small>Free Gmail account · drafts waiting to be sent</small></div>
+      <div class="flow-step"><span class="n">2</span><span class="cnt">${rows.filter(q => q.status === 'accepted').length}</span><span class="k">Step 2</span><b>Lead approval & customer registration</b><small>Accepted quotes ready to convert</small></div>
+      <div class="flow-step"><span class="n">3</span><span class="cnt">${rows.filter(q => q.status === 'converted').length}</span><span class="k">Step 3</span><b>Invoice & PDF via customer app</b><small>Converted customers · invoices are pushed to the app</small></div>
+    </div>
+    ${mailBanner(mail)}
     <div class="kpis">
       <div class="kpi amber"><div class="num">${open.length}</div><div class="lbl">Open quotes</div></div>
       <div class="kpi violet"><div class="num" style="font-size:24px">${AED(open.reduce((a, q) => a + q.total, 0))}</div><div class="lbl">Open value</div></div>
@@ -233,10 +246,10 @@ async function quotations() {
     <div class="card scroll-x">${rows.length ? `<table><tr><th>Number</th><th>Client</th><th>Total</th><th>Valid until</th><th>Sent</th><th>Status</th><th></th></tr>
       ${rows.map(q => `<tr><td><b>${esc(q.number)}</b> <span class="muted small">v${q.version}</span></td>
         <td>${esc(q.lead?.company || q.lead?.contact || '—')}<br><span class="muted small">${esc(q.lead?.contact || '')}</span></td>
-        <td><b>${AED(q.total)}</b></td><td class="small">${esc(q.valid_until || '—')}</td>
-        <td class="small muted">${q.sent_at ? esc(q.sent_via) + ' · ' + String(q.sent_at).slice(0, 16) : '—'}</td>
+        <td><b>${AED(q.total)}</b></td><td class="small">${dmy(q.valid_until)}</td>
+        <td class="small muted">${q.sent_at ? `${icon(q.sent_via === 'gmail' ? 'mail' : 'send', 12)} ${esc(q.sent_via)} · ${dmyTime(q.sent_at)}${q.sent_to ? '<br>' + esc(q.sent_to) : ''}` : '<span class="pill draft">not sent</span>'}</td>
         <td><span class="pill ${q.status}">${q.status}</span></td>
-        <td class="r" style="white-space:nowrap">${q.status === 'accepted' ? `<button class="btn primary small" onclick="convertQuote(${q.id})">Convert</button> ` : ''}<button class="btn ghost small" onclick="quoteDetail(${q.id})">Open</button></td></tr>`).join('')}</table>`
+        <td class="r" style="white-space:nowrap">${q.status === 'draft' ? `<button class="btn gmail small" onclick="sendQuoteForm(${q.id})">${icon('mail', 12)} Send</button> ` : ''}${q.status === 'accepted' ? `<button class="btn primary small" onclick="convertQuote(${q.id})">Convert</button> ` : ''}<button class="btn ghost small" onclick="quoteDetail(${q.id})">Open</button></td></tr>`).join('')}</table>`
       : '<p class="empty">No quotations yet. Create one from a lead.</p>'}</div>`;
 }
 async function pickLeadForQuote() {
@@ -306,14 +319,14 @@ async function quoteDetail(id) {
   const editable = ['draft', 'sent'].includes(q.status);
   openModal(`
     <div class="row spread"><h3 style="margin:0">${esc(q.number)} <span class="muted small">v${q.version}</span></h3><span class="pill ${q.status}">${q.status}</span></div>
-    <p class="muted small" style="margin:4px 0 12px">${esc(q.lead?.company || '')} · ${esc(q.lead?.contact || '')} · valid until ${esc(q.valid_until)}${q.sent_at ? ' · sent ' + esc(q.sent_via) + ' ' + String(q.sent_at).slice(0, 16) : ''}</p>
+    <p class="muted small" style="margin:4px 0 12px">${esc(q.lead?.company || '')} · ${esc(q.lead?.contact || '')} · valid until ${dmy(q.valid_until)}${q.sent_at ? ' · sent via ' + esc(q.sent_via) + (q.sent_to ? ' to ' + esc(q.sent_to) : '') + ' on ' + dmyTime(q.sent_at) : ' · not sent yet'}</p>
     <table><tr><th>Service</th><th>Site</th><th class="r">Visits</th><th class="r">Unit</th><th class="r">Line</th></tr>
       ${q.items.map(i => `<tr><td>${esc(i.description || i.service_code)}</td><td class="small">${esc(i.site || 'All')}</td><td class="r">${i.qty}</td><td class="r">${i.unit_price.toFixed(2)}</td><td class="r">${i.line_total.toFixed(2)}</td></tr>`).join('')}</table>
     <table class="qtot"><tr><td>Subtotal</td><td class="r">${AED(q.subtotal)}</td></tr><tr><td>VAT 5%</td><td class="r">${AED(q.vat)}</td></tr><tr class="g"><td>Total</td><td class="r">${AED(q.total)}</td></tr></table>
     <p class="small"><b>Plan:</b> ${esc(ruleLabel(q.plan.recurrence))} · window ${esc(q.plan.time_window)} · ${q.plan.billing === 'per_visit' ? 'billed per visit' : 'billed monthly'}</p>
     <div class="row" style="margin-top:14px">
       <button class="btn ghost" onclick="openDoc('/quotations/${q.id}/pdf?print=1')">${icon('download', 13)} PDF</button>
-      ${editable ? `<button class="btn wa" onclick="sendQuote(${q.id})">${icon('send', 13)} Send via WhatsApp</button>` : ''}
+      ${editable ? `<button class="btn gmail" onclick="sendQuoteForm(${q.id})">${icon('mail', 13)} ${q.sent_at ? 'Resend' : 'Send'} via Gmail</button>` : ''}
       ${editable ? `<button class="btn ghost" onclick="quoteStatus(${q.id},'accepted')">Mark accepted</button><button class="btn ghost" onclick="quoteStatus(${q.id},'rejected')">Mark rejected</button>` : ''}
       ${q.status === 'accepted' ? `<button class="btn primary" onclick="convertQuote(${q.id})">${icon('userCheck', 13)} Convert to customer</button>` : ''}
       ${editable || q.status === 'expired' ? `<button class="btn ghost" onclick='quoteForm(${jsonAttr({ lead_id: q.lead_id, revise_of: q.id, number: q.number, items: q.items, plan: q.plan, notes: q.notes })})'>Revise (v${q.version + 1})</button>` : ''}
@@ -321,15 +334,50 @@ async function quoteDetail(id) {
     ${q.versions.length > 1 ? `<p class="muted small" style="margin-top:12px">Versions: ${q.versions.map(v => `<a href="#" onclick="quoteDetail(${v.id});return false">v${v.version} (${v.status}, ${AED(v.total)})</a>`).join(' · ')}</p>` : ''}
     <div id="q-out"></div>`, true);
 }
+// STEP 1 — send by Gmail. Shows the recipient first so a missing / wrong email is caught before sending.
+async function sendQuoteForm(id) {
+  const [q, mail] = await Promise.all([api('/quotations/' + id), api('/mail/status').catch(() => ({ configured: false }))]);
+  window._sqCompose = !mail.configured;
+  openModal(`
+    <h3>${icon('mail', 17)} Send ${esc(q.number)} v${q.version} via Gmail</h3>
+    <p class="muted small" style="margin-bottom:12px">${esc(q.lead?.company || q.lead?.contact || '')} · ${AED(q.total)} incl. VAT · valid until ${dmy(q.valid_until)}</p>
+    ${mailBanner(mail)}
+    ${field('To (customer email)', `<input id="sq-to" type="email" value="${esc(q.lead?.email || '')}" placeholder="name@company.ae" autocomplete="off">`)}
+    <p class="muted small" style="margin:-4px 0 12px">The email contains the quotation summary and one button to view it, download the PDF and accept online. ${q.lead?.email ? '' : '<b style="color:var(--amber)">This lead has no email saved — type it here.</b>'}</p>
+    <div class="row"><button class="btn gmail" id="sq-go" onclick="sendQuote(${id})">${icon('send', 13)} ${mail.configured ? 'Send email now' : 'Open in Gmail'}</button>
+      <button class="btn ghost" onclick="sendQuoteWa(${id})" title="Fallback only — Gmail is the standard channel">WhatsApp instead</button>
+      <button class="btn ghost" onclick="quoteDetail(${id})">Back</button></div>
+    <p id="m-err" class="err"></p>`);
+}
 async function sendQuote(id) {
-  const r = await api(`/quotations/${id}/send`, { method: 'POST', body: { base_url: location.origin } });
-  window.open(r.whatsapp_url, '_blank');
-  toast('WhatsApp opened with the quote summary and link — sent time logged');
-  quoteDetail(id);
-  if (currentPage === 'quotations') quotations();
+  const to = $('#sq-to').value.trim();
+  $('#m-err').textContent = '';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) { $('#m-err').textContent = 'Enter a valid email address for the customer'; $('#sq-to').focus(); return; }
+  const btn = $('#sq-go'); btn.disabled = true;
+  // The no-setup fallback opens Gmail in a new tab. Browsers only allow that directly
+  // inside the click, so the tab is reserved now and pointed at Gmail once the server answers.
+  const tab = window._sqCompose ? window.open('about:blank', '_blank') : null;
+  try {
+    const r = await api(`/quotations/${id}/send`, { method: 'POST', body: { base_url: location.origin, to, via: 'gmail' } });
+    if (r.delivery === 'compose') {
+      if (tab) tab.location = r.gmail_compose_url;
+      toast(tab ? `Gmail opened with the quotation for ${r.to} — press Send there. Logged as sent.` : 'Your browser blocked the Gmail tab — allow pop-ups for this site, then press Resend via Gmail.', tab ? 'success' : 'warning');
+    } else { if (tab) tab.close(); toast(`Quotation emailed to ${r.to}`, 'success'); }
+    quoteDetail(id);
+    if (currentPage === 'quotations') quotations();
+  } catch (e) { if (tab) tab.close(); $('#m-err').textContent = e.message; btn.disabled = false; }
+}
+async function sendQuoteWa(id) {
+  try {
+    const r = await api(`/quotations/${id}/send`, { method: 'POST', body: { base_url: location.origin, via: 'whatsapp' } });
+    window.open(r.whatsapp_url, '_blank');
+    toast('WhatsApp opened with the quote summary and link — logged as sent', 'success');
+    quoteDetail(id);
+    if (currentPage === 'quotations') quotations();
+  } catch (e) { $('#m-err').textContent = e.message; }
 }
 async function quoteStatus(id, status) {
-  try { await api(`/quotations/${id}/status`, { method: 'POST', body: { status } }); toast('Quotation ' + status); quoteDetail(id); if (currentPage === 'quotations') quotations(); }
+  try { await api(`/quotations/${id}/status`, { method: 'POST', body: { status } }); toast('Quotation ' + status, status === 'accepted' ? 'success' : 'info'); quoteDetail(id); if (currentPage === 'quotations') quotations(); }
   catch (e) { toast(e.message, 'critical'); }
 }
 async function convertQuote(id) {
@@ -339,8 +387,13 @@ async function convertQuote(id) {
     openModal(`<h3>${icon('checkCircle', 18)} Customer created</h3>
       <div class="kv"><span>Sites</span><div>${r.sites}</div><span>Service plans</span><div>${r.plans}</div><span>Jobs generated</span><div>${r.jobs_generated} (next 14 days)</div>
       <span>Portal code</span><div><b style="font-size:22px;letter-spacing:4px">${r.portal_code}</b><br><span class="muted small">Shown once. Customers can also sign in with an OTP to their phone or email.</span></div></div>
-      <div class="row" style="margin-top:16px"><a class="btn wa" href="${r.whatsapp_url}" target="_blank" rel="noopener">${icon('send', 13)} Send portal access on WhatsApp</a>
+      <div class="banner ${r.email.sent ? 'ok' : ''}" style="margin-top:14px">${icon('mail', 16)}<div>${r.email.sent ? `App access emailed to <b>${esc(r.email.to)}</b>.`
+        : r.email.to ? `App access was <b>not emailed automatically</b>${r.email.error ? ' (' + esc(r.email.error) + ')' : ' (Gmail not connected)'} — use the button below.` : 'This customer has no email — share the code by phone or WhatsApp.'}
+        <br>A welcome message is waiting in their app. Invoices will be delivered there with the PDF.</div></div>
+      <div class="row" style="margin-top:12px">${!r.email.sent && r.email.gmail_compose_url ? `<a class="btn gmail" href="${esc(r.email.gmail_compose_url)}" target="_blank" rel="noopener">${icon('mail', 13)} Send app access via Gmail</a>` : ''}
+      <a class="btn ghost" href="${r.whatsapp_url}" target="_blank" rel="noopener">WhatsApp</a>
       <button class="btn primary" onclick="closeModal();customer360(${r.customer_id})">Open customer 360</button></div>`);
+    toast(`Customer registered — ${r.jobs_generated} job(s) scheduled`, 'success');
     if (currentPage === 'quotations') quotations();
   } catch (e) { toast(e.message, 'critical'); }
 }
@@ -384,10 +437,10 @@ async function customer360(id) {
       <div class="card scroll-x"><h3>${icon('wallet', 15)} Invoices & payments</h3>
         ${d.invoices.length ? `<table><tr><th>Invoice</th><th>Period</th><th class="r">Total</th><th class="r">Balance</th><th>Status</th><th></th></tr>${d.invoices.map(i => `<tr><td><b>${esc(i.number)}</b></td><td>${i.period}</td><td class="r">${AED(i.amount)}</td><td class="r">${AED(i.balance)}</td>
           <td><span class="pill ${i.status_label.split(' ')[0]}">${i.status_label}</span></td><td class="r" style="white-space:nowrap"><button class="btn ghost small" onclick="openDoc('/invoices/${i.id}/pdf')">View</button>${CRM_ROLE === 'owner' && i.balance > 0 && i.status_label !== 'Void' ? ` <button class="btn primary small" onclick='paymentForm(${jsonAttr({ id: i.id, number: i.number, balance: i.balance })})'>Pay</button>` : ''}</td></tr>`).join('')}</table>` : '<p class="empty">No invoices yet.</p>'}
-        ${d.payments.length ? `<p class="small muted" style="margin-top:10px">Payments: ${d.payments.slice(0, 6).map(p => `${String(p.received_at).slice(0, 10)} ${AED(p.amount)} (${p.method})`).join(' · ')}</p>` : ''}
+        ${d.payments.length ? `<p class="small muted" style="margin-top:10px">Payments: ${d.payments.slice(0, 6).map(p => `${dmy(p.received_at)} ${AED(p.amount)} (${p.method})`).join(' · ')}</p>` : ''}
       </div>
     </div>
-    ${d.lead ? `<div class="card"><h3>${icon('target', 15)} Sales history</h3><p class="small">Lead from <b>${esc(d.lead.source)}</b>, created ${String(d.lead.created_at).slice(0, 10)} by contact ${esc(d.lead.contact)}. ${d.lead.notes ? '“' + esc(d.lead.notes) + '”' : ''}</p></div>` : ''}`;
+    ${d.lead ? `<div class="card"><h3>${icon('target', 15)} Sales history</h3><p class="small">Lead from <b>${esc(d.lead.source)}</b>, created ${dmy(d.lead.created_at)} by contact ${esc(d.lead.contact)}. ${d.lead.notes ? '“' + esc(d.lead.notes) + '”' : ''}</p></div>` : ''}`;
 }
 async function genInvoiceFor(id) {
   const r = await api('/invoices/generate', { method: 'POST', body: { period: today().slice(0, 7), customer_id: id } });
@@ -542,7 +595,7 @@ async function invoices() {
   const rows = d.rows.filter(i => invFilter === 'all' || i.status_label.startsWith(invFilter));
   const tabs = ['all', 'Due', 'Overdue', 'Partly', 'Paid'].map(t => `<button class="ptab ${invFilter === t ? 'on' : ''}" onclick="invFilter='${t}';invoices()">${t === 'all' ? 'All' : t === 'Partly' ? 'Partly paid' : t}</button>`).join('');
   $('#main').innerHTML = `
-    <div class="head"><div><h1>Invoices & payments</h1><p class="sub">Invoices are built only from completed, photo-verified, billable visits. Confirmed no-pickups and free revisits are never billed.</p></div>
+    <div class="head"><div><h1>Invoices & payments</h1><p class="sub">Invoices are built only from completed, photo-verified, billable visits and are delivered to the customer app (in-app + push) with the PDF. Dates are DD/MM/YYYY.</p></div>
       ${CRM_ROLE === 'owner' ? `<div class="row"><input id="inv-period" type="month" value="${today().slice(0, 7)}" style="width:160px"><button class="btn primary" onclick="genInvoices()">${icon('wallet', 13)} Generate invoices</button></div>` : ''}</div>
     <div class="kpis">
       <div class="kpi blue"><div class="num" style="font-size:24px">${AED(d.summary.billed)}</div><div class="lbl">Billed</div></div>
@@ -552,17 +605,28 @@ async function invoices() {
       <div class="kpi"><div class="num">${d.unbilled_jobs}</div><div class="lbl">Completed jobs not yet invoiced</div></div>
     </div>
     <div class="row" style="margin-bottom:12px"><div class="ptabs">${tabs}</div></div>
-    <div class="card scroll-x">${rows.length ? `<table><tr><th>Invoice</th><th>Customer</th><th>Period</th><th class="r">Visits</th><th class="r">Total</th><th class="r">Paid</th><th class="r">Balance</th><th>Due</th><th>Status</th><th></th></tr>
-    ${rows.map(i => `<tr><td><b>${esc(i.number)}</b></td><td>${esc(i.customer?.name || '')}<br><span class="muted small">${esc(i.customer?.branch || '')}</span></td><td>${i.period}</td>
-      <td class="r">${i.job_ids.length}</td><td class="r">${AED(i.amount)}</td><td class="r">${AED(i.paid)}</td><td class="r"><b>${AED(i.balance)}</b></td><td class="small">${i.due_date}</td>
+    <div class="card scroll-x">${rows.length ? `<table><tr><th>Invoice</th><th>Customer</th><th>Period</th><th class="r">Visits</th><th class="r">Total</th><th class="r">Paid</th><th class="r">Balance</th><th>Due</th><th>Customer app</th><th>Status</th><th></th></tr>
+    ${rows.map(i => `<tr><td><b>${esc(i.number)}</b></td><td>${esc(i.customer?.name || '')}<br><span class="muted small">${esc(i.customer?.branch || '')}</span></td><td>${i.period.slice(5)}/${i.period.slice(0, 4)}</td>
+      <td class="r">${i.job_ids.length}</td><td class="r">${AED(i.amount)}</td><td class="r">${AED(i.paid)}</td><td class="r"><b>${AED(i.balance)}</b></td><td class="small">${dmy(i.due_date)}</td>
+      <td class="small">${i.sent_at ? `<span style="color:var(--green)">${icon('smartphone', 12)} sent</span><br><span class="muted">${dmyTime(i.sent_at)}${i.sent_count > 1 ? ' · ×' + i.sent_count : ''}</span>` : '<span class="muted">not sent</span>'}</td>
       <td><span class="pill ${i.status_label.split(' ')[0]}">${i.status_label}</span></td>
       <td class="r" style="white-space:nowrap"><button class="btn ghost small" onclick="openDoc('/invoices/${i.id}/pdf?print=1')">${icon('download', 12)} PDF</button>
+        ${CRM_ROLE === 'owner' && i.status_label !== 'Void' ? ` <button class="btn ghost small" title="Push this invoice (with PDF link) to the customer app" onclick="sendInvoice(${i.id},'${esc(i.number)}')">${icon('smartphone', 12)} ${i.sent_at ? 'Resend' : 'Send'} to app</button>` : ''}
         ${CRM_ROLE === 'owner' && i.balance > 0 && i.status_label !== 'Void' ? ` <button class="btn primary small" onclick='paymentForm(${jsonAttr({ id: i.id, number: i.number, balance: i.balance })})'>Record payment</button>` : ''}
         ${CRM_ROLE === 'owner' && i.paid === 0 && i.status_label !== 'Void' ? ` <button class="btn ghost small" onclick="voidInvoice(${i.id})">Void</button>` : ''}</td></tr>`).join('')}</table>`
     : '<p class="empty">No invoices in this view.</p>'}</div>`;
 }
+// STEP 3 — push an invoice to the customer app
+async function sendInvoice(id, number) {
+  try {
+    const r = await api(`/invoices/${id}/send`, { method: 'POST' });
+    if (r.push.delivered) toast(`${number} sent to the customer app — pushed to ${r.push.delivered} device(s)`, 'success');
+    else toast(`${number} is in the customer's app inbox. No push was delivered: the customer has not turned on notifications on any phone yet.`, 'warning');
+    invoices();
+  } catch (e) { toast(e.message, 'critical'); }
+}
 async function genInvoices() {
-  try { const r = await api('/invoices/generate', { method: 'POST', body: { period: $('#inv-period').value } }); toast(`${r.created} invoice(s) issued for ${$('#inv-period').value}`); invoices(); }
+  try { const r = await api('/invoices/generate', { method: 'POST', body: { period: $('#inv-period').value } }); const p = $('#inv-period').value; toast(r.created ? `${r.created} invoice(s) issued for ${p.slice(5)}/${p.slice(0, 4)} and sent to the customer app` : `No completed, un-invoiced visits for ${p.slice(5)}/${p.slice(0, 4)}`, r.created ? 'success' : 'info'); invoices(); }
   catch (e) { toast(e.message, 'critical'); }
 }
 function paymentForm(i) {
@@ -579,7 +643,7 @@ function paymentForm(i) {
 async function savePayment(id) {
   try {
     const r = await api('/payments', { method: 'POST', body: { invoice_id: id, amount: Number($('#pay-a').value), method: $('#pay-m').value, reference: $('#pay-r').value, received_at: new Date($('#pay-d').value).toISOString() } });
-    closeModal(); toast(`Payment recorded — balance ${AED(r.balance)}`); if (currentPage === 'invoices') invoices();
+    closeModal(); toast(`Payment recorded — balance ${AED(r.balance)}. Customer notified in the app.`, 'success'); if (currentPage === 'invoices') invoices();
   } catch (e) { $('#m-err').textContent = e.message; }
 }
 async function voidInvoice(id) {
@@ -645,15 +709,24 @@ async function settingsV3() {
         ${field('Default time window', `<input id="st-win" value="${esc(s.default_time_window)}" placeholder="07:00-12:00">`)}
         ${field('Invoice due (days)', `<input id="st-due" type="number" value="${esc(s.invoice_due_days)}">`)}
         ${field('Company WhatsApp number', `<input id="st-wa" value="${esc(s.company_whatsapp)}">`)}
+        ${field('Reply-to email on quotations', `<input id="st-mail" type="email" value="${esc(s.company_email || '')}" placeholder="sales@yourcompany.ae">`)}
+        <h3 style="margin-top:16px">${icon('mail', 15)} Gmail (quotations)</h3>
+        ${mailBanner(s.mail)}
+        ${s.mail && s.mail.configured ? `<div class="row"><input id="st-test" type="email" placeholder="Send a test email to…" style="max-width:260px"><button class="btn ghost small" onclick="mailTest()">Send test</button></div>` : ''}
       </div>
       <div class="card"><h3>${icon('calendar', 15)} UAE public holidays</h3>
-        <p class="muted small" style="margin-bottom:8px">One date per line (YYYY-MM-DD). Lunar holidays move each year — update when officially announced. Plan visits on these dates are skipped and flagged for rescheduling.</p>
+        <p class="muted small" style="margin-bottom:8px">One date per line, typed as YYYY-MM-DD (year-month-day) so they sort correctly; shown everywhere else as DD/MM/YYYY. Lunar holidays move each year — update when officially announced. Plan visits on these dates are skipped and flagged for rescheduling.</p>
         <textarea id="st-hol" style="min-height:230px">${s.uae_holidays.join('\n')}</textarea></div>
     </div>
     <button class="btn primary" onclick="saveSettingsV3()">Save settings</button>`;
 }
 async function saveSettingsV3() {
-  await api('/v3/settings', { method: 'PUT', body: { shift_cutoff: $('#st-cut').value, default_time_window: $('#st-win').value, invoice_due_days: $('#st-due').value,
-    company_whatsapp: $('#st-wa').value, uae_holidays: $('#st-hol').value.split('\n').map(x => x.trim()).filter(Boolean) } });
-  toast('Settings saved');
+  try { await api('/v3/settings', { method: 'PUT', body: { shift_cutoff: $('#st-cut').value, default_time_window: $('#st-win').value, invoice_due_days: $('#st-due').value,
+    company_whatsapp: $('#st-wa').value, company_email: $('#st-mail').value.trim(), uae_holidays: $('#st-hol').value.split('\n').map(x => x.trim()).filter(Boolean) } });
+  } catch (e) { return toast(e.message, 'critical'); }
+  toast('Settings saved', 'success');
+}
+async function mailTest() {
+  try { const r = await api('/mail/test', { method: 'POST', body: { to: $('#st-test').value.trim() } }); toast(`Test email sent to ${r.to}`, 'success'); }
+  catch (e) { toast(e.message, 'critical'); }
 }

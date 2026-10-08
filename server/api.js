@@ -12,23 +12,30 @@ const scheduler = require('./services/scheduler');
 const rescheduler = require('./services/rescheduler');
 const sla = require('./services/sla');
 const v3 = require('./v3');
+const security = require('./security');
+const capacity = require('./capacity');
 
-const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+require('./security').ensureSecret();
+const SECRET = process.env.JWT_SECRET;
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const upload = multer({
   storage: multer.diskStorage({
     destination: UPLOAD_DIR,
-    filename: (req, file, cb) => cb(null, `pickup_${req.params.id}_${Date.now()}${path.extname(file.originalname) || '.jpg'}`),
+    // random name + extension from the real file type (never the phone's file name)
+    filename: security.safeImageName('pickup'),
   }),
-  limits: { fileSize: 12 * 1024 * 1024 },
+  fileFilter: security.imageFileFilter,
+  limits: { fileSize: 12 * 1024 * 1024, files: 1 },
 });
 
 function sign(user) {
   return jwt.sign({ id: user.id, role: user.role, crm_role: user.role === 'admin' ? (user.crm_role || 'owner') : undefined, name: user.full_name, vehicle_id: user.vehicle_id || null },
     SECRET, { expiresIn: '14h' });
 }
+const { driverJobError } = security;
+
 function auth(role) {
   return (req, res, next) => {
     const h = req.headers.authorization || '';
@@ -81,10 +88,12 @@ module.exports = function buildApi(io) {
   r.post('/pickups/:id/ack', auth('driver'), (req, res) => {
     const p = q.get(`SELECT * FROM pickups WHERE id=?`, req.params.id);
     if (!p) return res.status(404).json({ error: 'Not found' });
+    const denied = driverJobError(p, req.user);
+    if (denied) return res.status(denied[0]).json({ error: denied[1] });
     if (!['pending', 'overdue'].includes(p.status)) return res.status(409).json({ error: `Already ${p.status}` });
     q.run(`UPDATE pickups SET stage='acknowledged', updated_at=datetime('now') WHERE id=?`, p.id);
     const info = q.get(`SELECT c.name, c.branch FROM pickups p JOIN customers c ON c.id=p.customer_id WHERE p.id=?`, p.id);
-    io.emit('pickup:ack', { id: p.id, customer: info.name, branch: info.branch, driver: req.user.name });
+    io.to('staff').emit('pickup:ack', { id: p.id, customer: info.name, branch: info.branch, driver: req.user.name });
     try { v3.notifyCustomer(p.customer_id, 'on_way', 'Driver on the way', `${req.user.name} has started your visit at ${info.name} ${info.branch || ''}`); } catch {}
     res.json({ ok: true, stage: 'acknowledged' });
   });
@@ -123,7 +132,8 @@ module.exports = function buildApi(io) {
     const p = q.get(`SELECT * FROM pickups WHERE id=?`, req.params.id);
     const drop = () => { if (req.file) fs.unlink(req.file.path, () => {}); };
     if (!p) { drop(); return res.status(404).json({ error: 'Not found' }); }
-    if (p.driver_id && p.driver_id !== req.user.id) { drop(); return res.status(403).json({ error: 'Not your job' }); }
+    const denied = driverJobError(p, req.user);
+    if (denied) { drop(); return res.status(denied[0]).json({ error: denied[1] }); }
     if (['collected', 'canceled', 'rescheduled'].includes(p.status)) { drop(); return res.status(409).json({ error: `Already ${p.status}` }); }
     if (!req.file) return res.status(400).json({ error: 'Verification photo is required' });
     const check = v3.validateProof(p, req.body || {});
@@ -132,6 +142,7 @@ module.exports = function buildApi(io) {
       q.run(`UPDATE pickups SET photo_url=? WHERE id=?`, `/uploads/${req.file.filename}`, p.id); // keep for ops review
       return res.status(422).json({ error: 'Photo rejected', problems: check.problems, rejected: true });
     }
+    v3.flagLateProof(p, check, req.user.name);
     const checklist = (() => { try { return JSON.parse(req.body.checklist || '[]'); } catch { return []; } })();
     const ts = new Date().toISOString();
     q.run(`UPDATE pickups SET status='collected', stage='completed', completed_at=?, photo_url=?, gps_lat=?, gps_lng=?, photo_taken_at=?,
@@ -140,7 +151,7 @@ module.exports = function buildApi(io) {
       JSON.stringify(check.meta), JSON.stringify(checklist), p.id);
     const info = q.get(`SELECT c.name, c.branch, v.fleet_number FROM pickups p
       JOIN customers c ON c.id=p.customer_id LEFT JOIN vehicles v ON v.id=p.vehicle_id WHERE p.id=?`, p.id);
-    io.emit('pickup:completed', { id: p.id, customer: info.name, branch: info.branch, vehicle: info.fleet_number, photo_url: `/uploads/${req.file.filename}`, at: ts, driver: req.user.name });
+    io.to('staff').emit('pickup:completed', { id: p.id, customer: info.name, branch: info.branch, vehicle: info.fleet_number, photo_url: `/uploads/${req.file.filename}`, at: ts, driver: req.user.name });
     io.to('customer:' + p.customer_id).emit('pickup:completed', { id: p.id });
     try { v3.onPickupCompleted(p.id); } catch (e) { console.warn('onPickupCompleted', e.message); }
     res.json({ ok: true, status: 'collected', at: ts, distance_m: check.distance_m });
@@ -154,7 +165,8 @@ module.exports = function buildApi(io) {
     if (!NPU_REASONS.includes(reason)) { drop(); return res.status(400).json({ error: 'Invalid reason' }); }
     const p = q.get(`SELECT * FROM pickups WHERE id=?`, req.params.id);
     if (!p) { drop(); return res.status(404).json({ error: 'Not found' }); }
-    if (p.driver_id && p.driver_id !== req.user.id) { drop(); return res.status(403).json({ error: 'Not your job' }); }
+    const denied = driverJobError(p, req.user);
+    if (denied) { drop(); return res.status(denied[0]).json({ error: denied[1] }); }
     if (['collected', 'canceled', 'rescheduled'].includes(p.status)) { drop(); return res.status(409).json({ error: `Already ${p.status}` }); }
     if (!req.file) return res.status(400).json({ error: 'A live photo of the site is required' });
     const check = v3.validateProof(p, req.body || {});
@@ -163,6 +175,7 @@ module.exports = function buildApi(io) {
       drop();
       return res.status(422).json({ error: 'Photo rejected', problems: check.problems, rejected: true });
     }
+    v3.flagLateProof(p, check, req.user.name);
     q.run(`UPDATE pickups SET status='canceled', anomaly_reason=?, gps_lat=?, gps_lng=?, photo_url=?, photo_taken_at=?, proof_meta=?,
            completed_at=datetime('now'), updated_at=datetime('now') WHERE id=?`,
       reason, Number(req.body.lat), Number(req.body.lng), `/uploads/${req.file.filename}`, req.body.photo_taken_at || null, JSON.stringify(check.meta), p.id);
@@ -170,8 +183,8 @@ module.exports = function buildApi(io) {
     const info = q.get(`SELECT c.name, c.branch FROM pickups p JOIN customers c ON c.id=p.customer_id WHERE p.id=?`, p.id);
     const msg = `NOT PICKED UP: ${info.name} (${info.branch}) — ${reason.replace(/_/g, ' ')} (by ${req.user.name}) · awaiting customer confirmation`;
     q.run(`INSERT INTO alerts(type,severity,message,pickup_id) VALUES ('ANOMALY','warning',?,?)`, msg, p.id);
-    io.emit('pickup:canceled', { id: p.id, customer: info.name, branch: info.branch, reason, driver: req.user.name });
-    io.emit('alert', { type: 'ANOMALY', severity: 'warning', message: msg, pickup_id: p.id });
+    io.to('staff').emit('pickup:canceled', { id: p.id, customer: info.name, branch: info.branch, reason, driver: req.user.name });
+    io.to('staff').emit('alert', { type: 'ANOMALY', severity: 'warning', message: msg, pickup_id: p.id });
     res.json({ ok: true, status: 'canceled', confirmation_status: 'awaiting' });
   });
 
@@ -258,6 +271,9 @@ module.exports = function buildApi(io) {
     const { name, branch, zone, frequency, lat, lng, address, contact_phone } = req.body || {};
     if (!name || !zone || !lat || !lng) return res.status(400).json({ error: 'name, zone, lat, lng required' });
     if (![2, 3].includes(Number(frequency))) return res.status(400).json({ error: 'frequency must be 2 or 3' });
+    if (String(name).length > 160 || String(branch || '').length > 160) return res.status(400).json({ error: 'Name or branch is too long (max 160 characters)' });
+    if (contact_phone && !security.isPhone(contact_phone)) return res.status(400).json({ error: 'Phone number looks wrong — use digits, e.g. +971 50 123 4567' });
+    if (!(Math.abs(Number(lat)) <= 90 && Math.abs(Number(lng)) <= 180)) return res.status(400).json({ error: 'Location (lat/lng) is out of range' });
     const info = q.run(`INSERT INTO customers(name,branch,zone,frequency,lat,lng,address,contact_phone)
       VALUES (?,?,?,?,?,?,?,?)`, name, branch || '', zone, Number(frequency), Number(lat), Number(lng), address || '', contact_phone || '');
     res.json({ ok: true, id: Number(info.lastInsertRowid) });
@@ -266,6 +282,9 @@ module.exports = function buildApi(io) {
     const c = q.get(`SELECT * FROM customers WHERE id=?`, req.params.id);
     if (!c) return res.status(404).json({ error: 'Not found' });
     const b = { ...c, ...req.body };
+    if (!b.name || String(b.name).length > 160) return res.status(400).json({ error: 'Name is required (max 160 characters)' });
+    if (req.body && req.body.contact_phone && !security.isPhone(req.body.contact_phone)) return res.status(400).json({ error: 'Phone number looks wrong — use digits, e.g. +971 50 123 4567' });
+    if (!(Math.abs(Number(b.lat)) <= 90 && Math.abs(Number(b.lng)) <= 180)) return res.status(400).json({ error: 'Location (lat/lng) is out of range' });
     q.run(`UPDATE customers SET name=?,branch=?,zone=?,frequency=?,lat=?,lng=?,address=?,contact_phone=?,is_active=? WHERE id=?`,
       b.name, b.branch, b.zone, Number(b.frequency), Number(b.lat), Number(b.lng), b.address, b.contact_phone, b.is_active ? 1 : 0, c.id);
     res.json({ ok: true });
@@ -394,7 +413,11 @@ module.exports = function buildApi(io) {
         const d = new Date(start); d.setDate(d.getDate() + i);
         const ds = d.toISOString().slice(0, 10);
         const c = q.get(`SELECT COUNT(*) c FROM pickups WHERE vehicle_id=? AND scheduled_date=? AND status IN ('pending','collected','overdue')`, v.id, ds).c;
-        row.days.push({ date: ds, load: c, capacity: v.max_daily_capacity, pct: Math.round(100 * c / v.max_daily_capacity) });
+        const ov = capacity.overrideFor(v.id, ds);
+        const cap = ov ? ov.capacity : v.max_daily_capacity;
+        row.days.push({ date: ds, load: c, capacity: cap, default_capacity: v.max_daily_capacity,
+          override: ov ? { capacity: ov.capacity, reason: ov.reason, set_by: ov.set_by } : null,
+          over_by: Math.max(0, c - cap), pct: cap > 0 ? Math.round(100 * c / cap) : (c > 0 ? 999 : 0) });
       }
       return row;
     });
@@ -426,7 +449,7 @@ module.exports = function buildApi(io) {
     if (!result.skipped) {
       q.run(`INSERT INTO alerts(type,severity,message) VALUES ('INFO','info',?)`,
         `Monthly schedule generated for ${year}-${String(month).padStart(2, '0')}: ${result.created} pickups`);
-      io.emit('ledger:refresh', {});
+      io.to('staff').emit('ledger:refresh', {});
     }
     res.json(result);
   });
@@ -448,10 +471,13 @@ module.exports = function buildApi(io) {
   });
   r.post('/reschedule/apply', auth('admin'), (req, res) => {
     const { pickup_id, date, vehicle_id } = req.body || {};
+    const dErr = security.dateInRange(date, { futureDays: 366 }); if (dErr) return res.status(400).json({ error: dErr });
     const out = rescheduler.apply(Number(pickup_id), date, Number(vehicle_id));
     if (out.error) return res.status(409).json(out);
-    io.emit('ledger:refresh', { date });
-    io.emit('driver:queue-updated', { vehicle_id: Number(vehicle_id), date });
+    io.to('staff').emit('ledger:refresh', { date });
+    io.to('staff').emit('driver:queue-updated', { vehicle_id: Number(vehicle_id), date });
+    // push so the driver hears about it even with the app closed
+    try { v3.notifyVehicleDrivers(Number(vehicle_id), 'Route updated', `A stop was moved to your route on ${v3.dmy(date)}`); } catch {}
     res.json(out);
   });
 

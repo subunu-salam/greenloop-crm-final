@@ -104,9 +104,15 @@ h2.month small{color:var(--muted);font-weight:600;margin-left:6px}
 .sheet h3{font-size:18px;margin-bottom:10px}
 .notif{border-radius:14px;padding:12px;margin-bottom:8px}.notif.unread{border-left:3px solid var(--teal)}
 .row-btn{width:100%;text-align:left;border-radius:14px;padding:12px;margin-bottom:8px;display:block}.row-btn.on{border-color:var(--teal)}
-/* toasts + skeleton */
-.toasts{position:fixed;left:0;right:0;bottom:90px;display:flex;flex-direction:column;align-items:center;gap:8px;z-index:60;pointer-events:none}
-.toasts>*{background:rgba(8,40,35,.95);border:1px solid var(--line);padding:10px 16px;border-radius:12px;font-weight:600;box-shadow:var(--shadow);animation:up .2s}
+/* toasts — system messages at the TOP, under the status bar (v3.2) */
+.toasts{position:fixed;left:0;right:0;top:calc(10px + env(safe-area-inset-top,0px));display:flex;flex-direction:column;align-items:center;gap:8px;z-index:120;pointer-events:none;padding:0 12px}
+.toasts>*{pointer-events:auto;width:100%;max-width:520px;display:flex;align-items:flex-start;gap:10px;background:rgba(8,46,40,.9);border:1px solid rgba(45,212,191,.55);border-left:5px solid var(--teal);padding:13px 15px;border-radius:16px;font-weight:700;font-size:14.5px;line-height:1.4;
+  backdrop-filter:var(--blur);-webkit-backdrop-filter:var(--blur);box-shadow:0 18px 44px -12px rgba(0,0,0,.75),0 0 30px -10px rgba(45,212,191,.6),inset 0 1px 0 rgba(255,255,255,.1);animation:toastDrop .36s cubic-bezier(.2,1.2,.3,1) both!important}
+.toasts>* svg{flex-shrink:0;color:var(--teal);margin-top:1px}.toasts>* span{flex:1;word-break:break-word}
+.toasts>.success{border-color:rgba(34,197,94,.6);border-left-color:var(--green);box-shadow:0 18px 44px -12px rgba(0,0,0,.75),0 0 30px -10px rgba(34,197,94,.6),inset 0 1px 0 rgba(255,255,255,.1)}.toasts>.success svg{color:var(--green)}
+.toasts>.error{background:rgba(60,12,24,.92);border-color:rgba(244,63,94,.7);border-left-color:var(--red);color:#ffe4e6;box-shadow:0 18px 44px -12px rgba(0,0,0,.75),0 0 34px -8px rgba(244,63,94,.7),inset 0 1px 0 rgba(255,255,255,.1)}.toasts>.error svg{color:var(--red)}
+@keyframes toastDrop{from{opacity:0;transform:translateY(-24px) scale(.95)}}
+.blocked{color:var(--red)}
 .skel{height:90px;border-radius:18px;background:linear-gradient(90deg,var(--card),var(--card2),var(--card));background-size:200% 100%;animation:sk 1.2s infinite}
 @keyframes sk{to{background-position:-200% 0}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}

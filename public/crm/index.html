@@ -37,7 +37,7 @@
   <main id="main"></main>
 </div>
 
-<div id="toast-wrap"></div>
+<div id="toast-wrap" aria-live="polite"></div>
 <div id="modal-wrap" class="hidden" onclick="if(event.target===this)closeModal()"><div id="modal" class="modal"></div></div>
 
 <script src="/socket.io/socket.io.js"></script>
@@ -45,5 +45,6 @@
 <script src="fx.js"></script>
 <script src="app.js"></script>
 <script src="sales.js"></script>
+<script src="fleet.js"></script>
 </body>
 </html>

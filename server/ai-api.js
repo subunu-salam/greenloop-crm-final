@@ -1,6 +1,7 @@
 const { buildOpsBrief, customerRiskHints } = require('./ai');
 const jwt = require('jsonwebtoken');
-const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+require('./security').ensureSecret();
+const SECRET = process.env.JWT_SECRET;
 
 function authAdmin(req, res, next) {
   const h = req.headers.authorization || '';

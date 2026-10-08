@@ -6,6 +6,7 @@
 // ─────────────────────────────────────────────────────────────
 const { q } = require('../db');
 const { orderRoute } = require('./geo');
+const { capacityFor } = require('../capacity');
 
 const MIN_GAP = 8, MAX_GAP = 12;
 
@@ -38,7 +39,8 @@ function generateMonth(year, month, { force = false } = {}) {
          GROUP BY vehicle_id, scheduled_date`, first, last)
     .forEach(r => { if (load[r.vehicle_id]) load[r.vehicle_id][Number(r.scheduled_date.slice(8))] += r.c; });
 
-  const cap = Object.fromEntries(vehicles.map(v => [v.id, v.max_daily_capacity]));
+  // per-day capacity: the vehicle default unless the office set an override for that date
+  const capOn = (v, day) => capacityFor(v, dstr(year, month, day));
   const fallbackVehicle = (day) => vehicles.reduce((a, b) => (load[a.id][day] <= load[b.id][day] ? a : b));
 
   // Choose best day near target with lowest load & free capacity
@@ -50,7 +52,7 @@ function generateMonth(year, month, { force = false } = {}) {
       candidates.push(d);
     }
     candidates.sort((a, b) => load[vehicle.id][a] - load[vehicle.id][b] || Math.abs(a - target) - Math.abs(b - target));
-    for (const d of candidates) if (load[vehicle.id][d] < cap[vehicle.id]) return d;
+    for (const d of candidates) if (load[vehicle.id][d] < capOn(vehicle, d)) return d;
     return null;
   }
 

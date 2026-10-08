@@ -46,6 +46,12 @@ const PATHS = {
   phone: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
   mapPin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
   send: '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
+  wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  mail: '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>',
+  megaphone: '<path d="M3 11v2a1 1 0 0 0 1 1h3l6 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19.5 5.5a9 9 0 0 1 0 13"/>',
+  smartphone: '<rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
+  info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
 };
 const icon = (name, size = 16, cls = '') =>
   `<svg class="ic ${cls}" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${PATHS[name] || ''}</svg>`;
@@ -58,10 +64,12 @@ const NAV = [
   ['dashboard', 'grid', 'Dashboard'],
   ['ledger', 'list', 'Daily Route Ledger'],
   ['fleet', 'truck', 'Fleet Load Tracker'],
+  ['maintenance', 'wrench', 'Fleet maintenance'],
   ['reschedule', 'swap', 'Rescheduling'],
   ['confirmations', 'userCheck', 'Not-picked-up'],
   ['bookings', 'inbox', 'Bookings'],
   ['alerts', 'bell', 'Alerts'],
+  ['broadcast', 'megaphone', 'Push notifications'],
   ['Sales'],
   ['pipeline', 'funnel', 'Pipeline'],
   ['leads', 'target', 'Leads'],
@@ -124,9 +132,10 @@ $('#login-pass').addEventListener('keydown', e => e.key === 'Enter' && doLogin()
 // ── shell / realtime ─────────────────────────────────────────
 async function boot() {
   $('#login-screen').classList.add('hidden'); $('#app').classList.remove('hidden');
-  try { const me = await api('/me'); CRM_ROLE = me.crm_role === 'ops' ? 'ops' : 'owner'; $('#me-role').textContent = CRM_ROLE === 'ops' ? 'Ops staff' : 'Owner'; $('#me-name').textContent = me.name; } catch {}
+  try { const me = await api('/me'); CRM_ROLE = me.crm_role === 'ops' ? 'ops' : 'owner'; $('#me-role').textContent = CRM_ROLE === 'ops' ? 'Ops staff' : 'Owner'; $('#me-name').textContent = me.name;
+    if (me.weak_password) setTimeout(() => toast('Security: this account still uses the default password. Change it in Admin → Users.', 'warning'), 1200); } catch {}
   buildNav();
-  socket = io();
+  socket = io({ auth: { token } });
   socket.on('connect', () => { $('#live-dot').classList.remove('off'); $('#live-label').textContent = 'live stream on'; });
   socket.on('disconnect', () => { $('#live-dot').classList.add('off'); $('#live-label').textContent = 'reconnecting…'; });
   socket.on('pickup:completed', d => { toast(`Collected: ${d.customer} (${d.branch}) by ${d.driver} — ${d.vehicle}`); refreshIf(['dashboard','ledger']); });
@@ -134,6 +143,7 @@ async function boot() {
   socket.on('pickup:ack', d => { toast(`${d.driver} started pickup at ${d.customer} (${d.branch})`); });
   socket.on('alert', d => { toast(d.message, d.severity); bumpBadge(); });
   socket.on('ledger:refresh', () => refreshIf(['dashboard','ledger','fleet','confirmations','plans']));
+  socket.on('fleet:report', () => refreshIf(['maintenance']));
   socket.on('lead:changed', () => refreshIf(['leads','pipeline','quotations']));
   socket.emit('ops:join');
   nav('dashboard');
@@ -149,13 +159,38 @@ function nav(page, silent) {
   Promise.resolve(fn()).catch(e => { $('#main').innerHTML = `<div class="card"><h3>Could not load this page</h3><p class="muted">${esc(e.message)}</p></div>`; });
 }
 
+// System response messages: top-centre, colour-coded, dismissible (v3.2).
+// sev: 'info' | 'success' | 'warning' | 'critical'. Errors stay longer.
+const TOAST_ICON = { info: 'info', success: 'checkCircle', warning: 'alertTriangle', critical: 'xCircle' };
 function toast(msg, sev = 'info') {
+  if (!TOAST_ICON[sev]) sev = 'info';
+  const wrap = $('#toast-wrap');
+  // the same message twice in a row just refreshes the existing one
+  const dup = [...wrap.children].find(c => c.dataset.msg === String(msg) && !c.classList.contains('out'));
+  if (dup) dup.remove();
+  const ms = sev === 'critical' ? 9000 : sev === 'warning' ? 7500 : 5000;
   const t = document.createElement('div');
   t.className = 'toast ' + sev;
-  t.textContent = msg;
-  $('#toast-wrap').appendChild(t);
-  setTimeout(() => t.remove(), 6000);
+  t.dataset.msg = String(msg);
+  t.setAttribute('role', sev === 'critical' || sev === 'warning' ? 'alert' : 'status');
+  t.innerHTML = `<span class="t-ic">${icon(TOAST_ICON[sev], 17)}</span><span class="t-msg"></span><button class="t-x" aria-label="Dismiss">${icon('x', 15)}</button><i class="t-bar" style="animation-duration:${ms}ms"></i>`;
+  t.querySelector('.t-msg').textContent = msg;
+  const close = () => { t.classList.add('out'); setTimeout(() => t.remove(), 220); };
+  t.querySelector('.t-x').onclick = close;
+  wrap.prepend(t);                                   // newest on top
+  while (wrap.children.length > 4) wrap.lastChild.remove();
+  setTimeout(close, ms);
 }
+const toastOk = msg => toast(msg, 'success');
+// Form errors written into a modal / login (".err") are also raised as a top toast,
+// so a response is never hidden below the fold of a long form.
+new MutationObserver(muts => {
+  for (const m of muts) {
+    const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+    if (el && el.classList && el.classList.contains('err') && el.textContent.trim()) toast(el.textContent.trim(), 'critical');
+  }
+}).observe(document.body, { childList: true, characterData: true, subtree: true });
+
 async function refreshBadge() {
   try { const d = await api('/dashboard'); setBadge(d.unread_alerts); } catch {}
 }
@@ -177,7 +212,18 @@ let dashPeriod = 'daily';
 let _charts = [];
 function killCharts() { _charts.forEach(c => c.destroy()); _charts = []; }
 const dstr = d => d.toISOString().slice(0, 10);
-const fmtDay = s => new Date(s + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+const fmtDay = s => new Date(s + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+// One date format everywhere: DD/MM/YYYY (date / month / year). Stored values stay YYYY-MM-DD.
+const dmy = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || '')); return m ? `${m[3]}/${m[2]}/${m[1]}` : (s ? String(s) : '—'); };
+const dmyTime = s => { const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2})/.exec(String(s || '')); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}` : dmy(s); };
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// labelled date: 05/10/2026 with the month part tinted, plus "5 Oct" spelled out underneath
+function dmyParts(s) {
+  const [y, mo, d] = s.split('-');
+  const wd = WEEKDAYS[new Date(Date.UTC(+y, +mo - 1, +d)).getUTCDay()];
+  return { wd, html: `<span class="dmy" title="Date ${d} · Month ${mo} (${MONTHS[+mo - 1]}) · Year ${y}"><span class="dd">${d}</span><span class="sep">/</span><span class="mm">${mo}</span><span class="sep">/</span><span class="yy">${y}</span></span>`, long: `${+d} ${MONTHS[+mo - 1]} ${y}` };
+}
 
 function periodWindow(p) {
   const now = new Date(), today = dstr(now);
@@ -356,7 +402,7 @@ async function ledger(dateArg) {
         <td><span class="pill ${r.category || 'waste'}">${esc(r.service_type || 'WASTE')}</span>${r.is_revisit ? ' <span class="pill rescheduled">revisit</span>' : ''}</td>
         <td class="small">${esc(r.time_window || '—')}</td><td>${esc(r.driver || '—')}</td>
         <td><span class="pill ${r.status}">${r.status}</span>${r.anomaly_reason ? '<br><span class="muted small">' + r.anomaly_reason.replace(/_/g,' ') + '</span>' : ''}${r.confirmation_status ? `<br><span class="pill ${r.confirmation_status}">${r.confirmation_status.replace('_', ' ')}</span>` : ''}</td>
-        <td class="muted small">${(r.completed_at || '—').replace('T', ' ').slice(0, 16)}</td>
+        <td class="muted small">${r.completed_at ? dmyTime(r.completed_at) : '—'}</td>
         <td>${r.photo_url ? `<img class="photo-thumb" src="${r.photo_url}" onclick="viewPhoto('${r.photo_url}')">` : '—'}</td>
         <td class="small">${proofCell(r)}</td>
       </tr>`).join('')}</table></div></div>`).join('') || '<div class="card"><p class="muted">No routes scheduled for this date.</p></div>'}`;
@@ -381,23 +427,83 @@ async function genSchedule() {
   nav('ledger');
 }
 
-// ACTIVE FLEET LOAD TRACKER
+// ACTIVE FLEET LOAD TRACKER — DD/MM/YYYY dates + capacity moderation (v3.2)
 async function fleet() {
   const data = await api('/fleet/load?days=7');
+  const todayStr = dstr(new Date());
+  const anyOver = data.some(v => v.days.some(d => d.over_by > 0));
   $('#main').innerHTML = `
-    <h1>Active Fleet Load Tracker</h1>
-    <p class="sub">7-day utilisation vs. max daily capacity — scheduler keeps every day under the cap</p>
+    <div class="head"><div><h1>Active Fleet Load Tracker</h1>
+      <p class="sub">Next 7 days · stops scheduled vs. that day's capacity. Capacity is no longer fixed at 15 — set each truck's default, or change a single day.</p></div>
+      <span class="fmt-hint">${icon('calendar', 13)} Date format: DD/MM/YYYY &nbsp;(date / month / year)</span></div>
+    ${anyOver ? `<div class="banner red">${icon('alertTriangle', 16)} <div>Some days have more stops than capacity. Open <a href="#" onclick="nav('reschedule');return false">Rescheduling</a> or the ledger for that date to move stops.</div></div>` : ''}
     ${data.map(v => `
       <div class="card">
-        <div class="row spread"><h3>${icon('truck', 15)} ${esc(v.vehicle.fleet_number)} <span class="zone-tag">${esc(v.vehicle.zone)}</span></h3>
-        <span class="muted small">${esc(v.vehicle.plate)} · cap ${v.vehicle.max_daily_capacity}/day</span></div>
-        <table><tr>${v.days.map(d => `<th>${d.date.slice(5)}</th>`).join('')}</tr>
-        <tr>${v.days.map(d => `<td>
-          <div class="loadbar ${d.pct >= 100 ? 'fullcap' : d.pct >= 80 ? 'warn' : ''}">
-            <i style="width:${Math.min(d.pct, 100)}%"></i><span>${d.load}/${d.capacity}</span>
-          </div></td>`).join('')}</tr></table>
-      </div>`).join('')}
-    <p class="muted small">Add a 3rd vehicle in the Vehicles module — the next route generation automatically rebalances loads across the whole fleet.</p>`;
+        <div class="row spread" style="margin-bottom:12px"><h3 style="margin:0">${icon('truck', 15)} ${esc(v.vehicle.fleet_number)} <span class="zone-tag">${esc(v.vehicle.zone)}</span></h3>
+        <span class="muted small">${esc(v.vehicle.plate)} · default capacity <b style="color:var(--text)">${v.vehicle.max_daily_capacity}</b> stops/day
+          ${CRM_ROLE === 'owner' ? `<button class="cap-edit" onclick='capDefaultForm(${jsonSafe({ id: v.vehicle.id, fleet: v.vehicle.fleet_number, cap: v.vehicle.max_daily_capacity })})'>${icon('edit', 11)} Change default</button>` : ''}</span></div>
+        <div class="scroll-x"><div class="fleet-grid">${v.days.map(d => {
+          const p = dmyParts(d.date);
+          const cls = d.over_by > 0 ? 'over' : d.override ? 'moderated' : '';
+          return `<div class="day-cell ${cls} ${d.date === todayStr ? 'today' : ''}">
+            <div class="day-head"><span class="wd">${p.wd}</span>${d.date === todayStr ? '<span class="tag">TODAY</span>' : ''}</div>
+            ${p.html}<div class="dmy-long">${p.long}</div>
+            <div class="loadbar ${d.pct >= 100 ? 'fullcap' : d.pct >= 80 ? 'warn' : ''}"><i style="width:${Math.min(d.pct, 100)}%"></i><span>${d.load}/${d.capacity}</span></div>
+            <div class="cap-row"><span>Capacity <b>${d.capacity}</b></span>
+              <button class="cap-edit" title="Change capacity for ${dmy(d.date)} only" onclick='capDayForm(${jsonSafe({ id: v.vehicle.id, fleet: v.vehicle.fleet_number, date: d.date, cap: d.capacity, def: d.default_capacity, load: d.load, reason: d.override ? d.override.reason : '', has: !!d.override })})'>${icon('edit', 11)} Edit</button></div>
+            ${d.override ? `<div class="cap-note">Changed from ${d.default_capacity}${d.override.reason ? ' — ' + esc(d.override.reason) : ''}${d.override.set_by ? ' · ' + esc(d.override.set_by) : ''}</div>` : ''}
+            ${d.over_by > 0 ? `<div class="cap-note red">${d.over_by} stop(s) over capacity</div>` : ''}
+          </div>`; }).join('')}</div></div>
+      </div>`).join('') || '<div class="card"><p class="muted">No active vehicles.</p></div>'}
+    <p class="muted small">Bars: teal under 80% · amber from 80% · red when full. Day changes apply to auto-allocation, ad-hoc orders, bookings and rescheduling straight away. Vehicle issues and services are in <a href="#" onclick="nav('maintenance');return false">Fleet maintenance</a>.</p>`;
+}
+const jsonSafe = o => JSON.stringify(o).replace(/'/g, '&#39;').replace(/</g, '\\u003c');
+function capStep(n) { const i = $('#cap-val'); i.value = Math.max(0, Math.min(60, (Number(i.value) || 0) + n)); capHint(); }
+function capHint() {
+  const el = $('#cap-hint'); if (!el) return;
+  const v = Number($('#cap-val').value), load = Number(el.dataset.load);
+  el.innerHTML = v < load ? `<span style="color:var(--red)">${load} stops are already scheduled — ${load - v} will be over capacity and must be rescheduled.</span>`
+    : v === 0 ? 'Truck takes no stops this day.' : `${v - load} free slot(s) after this change.`;
+}
+function capDayForm(o) {
+  const p = dmyParts(o.date);
+  openModal(`
+    <h3>${icon('truck', 17)} ${esc(o.fleet)} — capacity for one day</h3>
+    <p style="margin-bottom:12px">${p.wd} ${p.html} <span class="muted small">(${p.long})</span></p>
+    ${field('Stops this truck can take that day (0 = off the road)', `<div class="stepper-num"><button class="btn ghost" onclick="capStep(-1)">−</button><input id="cap-val" type="number" min="0" max="60" value="${o.cap}" oninput="capHint()"><button class="btn ghost" onclick="capStep(1)">+</button>
+      <button class="btn ghost small" onclick="$('#cap-val').value=0;capHint()">Off the road (0)</button><button class="btn ghost small" onclick="$('#cap-val').value=${o.def};capHint()">Default (${o.def})</button></div>`)}
+    <p id="cap-hint" class="small muted" data-load="${o.load}" style="margin:-4px 0 10px"></p>
+    ${field('Reason (shown on the tracker)', `<input id="cap-reason" maxlength="200" value="${esc(o.reason)}" placeholder="e.g. Oil change at workshop · extra helper on board">`)}
+    <div class="row"><button class="btn primary" onclick="saveCapDay(${o.id},'${o.date}')">Save for ${dmy(o.date)}</button>
+      ${o.has ? `<button class="btn ghost" onclick="clearCapDay(${o.id},'${o.date}')">Back to default (${o.def})</button>` : ''}
+      <button class="btn ghost" onclick="closeModal()">Cancel</button></div>
+    <p id="m-err" class="err"></p>`);
+  capHint();
+}
+async function saveCapDay(id, date) {
+  try {
+    const r = await api('/fleet/capacity/override', { method: 'PUT', body: { vehicle_id: id, date, capacity: Number($('#cap-val').value), reason: $('#cap-reason').value } });
+    closeModal();
+    if (r.over_by > 0) toast(`Capacity for ${dmy(date)} set to ${r.capacity}. ${r.over_by} stop(s) are now over capacity — reschedule them.`, 'warning');
+    else toast(`Capacity for ${dmy(date)} set to ${r.capacity}`, 'success');
+    nav('fleet');
+  } catch (e) { $('#m-err').textContent = e.message; }
+}
+async function clearCapDay(id, date) {
+  try { await api('/fleet/capacity/override', { method: 'DELETE', body: { vehicle_id: id, date } }); closeModal(); toast(`${dmy(date)} is back to the default capacity`, 'success'); nav('fleet'); }
+  catch (e) { $('#m-err').textContent = e.message; }
+}
+function capDefaultForm(o) {
+  openModal(`
+    <h3>${icon('truck', 17)} ${esc(o.fleet)} — default daily capacity</h3>
+    <p class="muted small" style="margin-bottom:12px">Used for every day that has no one-day change. Applies to new scheduling from now on; already scheduled stops are not moved.</p>
+    ${field('Stops per day (1–60)', `<div class="stepper-num"><button class="btn ghost" onclick="capStep(-1)">−</button><input id="cap-val" type="number" min="1" max="60" value="${o.cap}"><button class="btn ghost" onclick="capStep(1)">+</button></div>`)}
+    <div class="row"><button class="btn primary" onclick="saveCapDefault(${o.id})">Save default</button><button class="btn ghost" onclick="closeModal()">Cancel</button></div>
+    <p id="m-err" class="err"></p>`);
+}
+async function saveCapDefault(id) {
+  try { const r = await api('/fleet/capacity/default', { method: 'PUT', body: { vehicle_id: id, capacity: Number($('#cap-val').value) } }); closeModal(); toast(`Default capacity changed from ${r.previous} to ${r.capacity} stops/day`, 'success'); nav('fleet'); }
+  catch (e) { $('#m-err').textContent = e.message; }
 }
 
 // RESCHEDULING MODULE
@@ -410,7 +516,7 @@ async function reschedule() {
     ${rows.length ? `<table><tr><th>Client</th><th>Zone</th><th>Was scheduled</th><th>Status</th><th>Reason</th><th></th></tr>
       ${rows.map(r => `<tr>
         <td><b>${esc(r.name)}</b><br><span class="muted small">${esc(r.branch)}</span></td>
-        <td><span class="zone-tag">${esc(r.zone)}</span></td><td>${r.scheduled_date}</td>
+        <td><span class="zone-tag">${esc(r.zone)}</span></td><td>${dmy(r.scheduled_date)}</td>
         <td><span class="pill ${r.status}">${r.status}</span></td>
         <td class="muted small">${(r.anomaly_reason || '—').replace(/_/g, ' ')}</td>
         <td><button class="btn primary small" onclick="showOptions(${r.id})">Find slots</button></td>
@@ -425,7 +531,7 @@ async function showOptions(id) {
     ${d.options.length ? d.options.map((o, i) => `
       <div class="opt-card">
         <div class="rank">#${i + 1}</div>
-        <div><b>${o.date}</b><br><span class="muted small">${o.fleet_number} · ${o.zone} · load ${o.current_load}/${o.capacity}</span></div>
+        <div><b>${dmy(o.date)}</b><br><span class="muted small">${o.fleet_number} · ${o.zone} · load ${o.current_load}/${o.capacity}</span></div>
         <div class="dev"><b>+${o.deviation_km} km</b><br><span class="muted small">route deviation</span></div>
         <button class="btn primary small" onclick="applyReschedule(${d.pickup.id},'${o.date}',${o.vehicle_id})">Dispatch</button>
       </div>`).join('') : '<p class="muted">No conflict-free slot in the next 7 days — increase capacity or add a vehicle.</p>'}
@@ -434,7 +540,7 @@ async function showOptions(id) {
 async function applyReschedule(pid, date, vid) {
   try {
     const r = await api('/reschedule/apply', { method: 'POST', body: { pickup_id: pid, date, vehicle_id: vid } });
-    closeModal(); toast(`Moved to ${r.new_date} on ${r.vehicle} — driver queue updated`); nav('reschedule');
+    closeModal(); toast(`Moved to ${dmy(r.new_date)} on ${r.vehicle} — driver notified`, 'success'); nav('reschedule');
   } catch (e) { toast(e.message, 'critical'); }
 }
 
@@ -561,7 +667,7 @@ async function saveUser(id, existingRole) {
   try {
     await api(id ? '/users/' + id : '/users', { method: id ? 'PUT' : 'POST', body });
     if (id && $('#u-crm')) await api(`/users/${id}/crm-role`, { method: 'PUT', body: { crm_role: $('#u-crm').value } });
-    closeModal(); toast('User saved'); nav('users');
+    closeModal(); toast('User saved', 'success'); nav('users');
   } catch (e) { $('#m-err').textContent = e.message; }
 }
 
@@ -601,7 +707,7 @@ async function saveVehicle(id) {
     const vr = await api(id ? '/vehicles/' + id : '/vehicles', { method: id ? 'PUT' : 'POST', body });
     const tags = [$('#v-t-waste').checked && 'waste', $('#v-t-pest').checked && 'pest'].filter(Boolean);
     if (tags.length) await api(`/vehicles/${id || vr.id}/tags`, { method: 'PUT', body: { service_tags: tags } });
-    closeModal(); toast('Vehicle saved — will join the next route generation'); nav('vehicles');
+    closeModal(); toast('Vehicle saved — will join the next route generation', 'success'); nav('vehicles');
   } catch (e) { $('#m-err').textContent = e.message; }
 }
 
@@ -664,10 +770,12 @@ async function alerts() {
     ${rows.map(a => `<div class="alert-item ${a.severity}">
       <div class="row spread"><b>${a.type.replace(/_/g, ' ')}</b> ${a.is_read ? '' : '<span class="badge" style="margin-left:0">new</span>'}</div>${esc(a.message)}
       ${a.type === 'PHOTO_REJECTED' && a.pickup_id ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="proofOverride(${a.pickup_id})">${icon('shield', 13)} Ops override…</button></div>` : ''}
+      ${a.type === 'VEHICLE_ISSUE' ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="nav('maintenance')">${icon('wrench', 13)} Open fleet maintenance</button></div>` : ''}
+      ${a.type === 'CAPACITY' ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="nav('fleet')">Open fleet tracker</button></div>` : ''}
       ${a.type === 'BOOKING' ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="nav('bookings')">Open bookings</button></div>` : ''}
       ${a.type === 'QUOTE_ACCEPTED' ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="nav('quotations')">Open quotations</button></div>` : ''}
       ${a.type === 'DISPUTE' ? `<div class="row" style="margin-top:8px"><button class="btn ghost small" onclick="nav('confirmations')">Open not-picked-up</button></div>` : ''}
-      <div class="t">${a.created_at}</div></div>`).join('') || '<div class="card"><p class="muted">No alerts.</p></div>'}`;
+      <div class="t">${dmyTime(a.created_at)}</div></div>`).join('') || '<div class="card"><p class="muted">No alerts.</p></div>'}`;
 }
 async function readAll() { await api('/alerts/read-all', { method: 'POST' }); setBadge(0); nav('alerts'); }
 

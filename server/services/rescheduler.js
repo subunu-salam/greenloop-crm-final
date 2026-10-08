@@ -9,6 +9,7 @@
 const { q } = require('../db');
 const { insertionCost } = require('./geo');
 const { resortDay } = require('./scheduler');
+const { capacityFor } = require('../capacity');
 
 const HORIZON_DAYS = 7;
 
@@ -41,7 +42,8 @@ function recommend(pickupId) {
         `SELECT COUNT(*) c FROM pickups
          WHERE vehicle_id = ? AND scheduled_date = ? AND status IN ('pending','collected','overdue')`,
         v.id, date).c;
-      if (dayLoad >= v.max_daily_capacity) continue;
+      const dayCap = capacityFor(v, date);
+      if (dayLoad >= dayCap) continue;
 
       // avoid same-day duplicate visit for this customer
       const dup = q.get(
@@ -58,7 +60,7 @@ function recommend(pickupId) {
 
       options.push({
         date, vehicle_id: v.id, fleet_number: v.fleet_number, zone: v.zone,
-        current_load: dayLoad, capacity: v.max_daily_capacity,
+        current_load: dayLoad, capacity: dayCap,
         deviation_km: Math.round(deviationKm * 100) / 100,
       });
     }
@@ -86,8 +88,9 @@ function apply(pickupId, date, vehicleId) {
   const dayLoad = q.get(
     `SELECT COUNT(*) c FROM pickups WHERE vehicle_id = ? AND scheduled_date = ? AND status IN ('pending','collected','overdue')`,
     vehicleId, date).c;
-  if (dayLoad >= vehicle.max_daily_capacity)
-    return { error: `Conflict: ${vehicle.fleet_number} already at capacity (${vehicle.max_daily_capacity}) on ${date}` };
+  const dayCap = capacityFor(vehicle, date);
+  if (dayLoad >= dayCap)
+    return { error: `Conflict: ${vehicle.fleet_number} already at capacity (${dayCap}) on ${date}` };
 
   const driver = q.get(`SELECT id FROM users WHERE role='driver' AND vehicle_id = ? AND is_active = 1`, vehicleId);
 

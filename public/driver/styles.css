@@ -192,3 +192,48 @@ button { font-family: inherit; color: inherit; }
 .sync-banner { position: fixed; bottom: 88px; left: 50%; transform: translateX(-50%); width: min(440px, calc(100vw - 30px)); background: rgba(245,158,11,.92); color: #1c1203; font-weight: 800; text-align: center; padding: 10px; border-radius: 14px; z-index: 35; }
 .empty { text-align: center; color: var(--muted); padding: 40px 20px; font-size: 15px; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { .win.risk, .livedot, .step.active .bub { animation: none; } }
+
+/* ───────── v3.2: top toasts ───────── */
+.toasts { position: fixed; left: 0; right: 0; top: calc(10px + env(safe-area-inset-top, 0px)); display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 130; pointer-events: none; padding: 0 10px; }
+.toasts > * { pointer-events: auto; width: 100%; max-width: 460px; display: flex; align-items: center; gap: 12px; background: rgba(8,46,40,.92); border: 1px solid rgba(45,212,191,.6); border-left: 6px solid var(--teal); padding: 15px 16px; border-radius: 18px; font-weight: 800; font-size: 16px; line-height: 1.35;
+  backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); box-shadow: 0 18px 44px -12px rgba(0,0,0,.8), 0 0 32px -8px rgba(45,212,191,.65), inset 0 1px 0 rgba(255,255,255,.1); animation: toastDrop .36s cubic-bezier(.2,1.2,.3,1) both !important; }
+.toasts > * svg { flex-shrink: 0; color: var(--teal); } .toasts > * span { flex: 1; word-break: break-word; }
+.toasts > .success { border-color: rgba(34,197,94,.65); border-left-color: var(--green); } .toasts > .success svg { color: var(--green); }
+.toasts > .error { background: rgba(60,12,24,.94); border-color: rgba(244,63,94,.75); border-left-color: var(--red); color: #ffe4e6; box-shadow: 0 18px 44px -12px rgba(0,0,0,.8), 0 0 36px -6px rgba(244,63,94,.75), inset 0 1px 0 rgba(255,255,255,.1); } .toasts > .error svg { color: var(--red); }
+@keyframes toastDrop { from { opacity: 0; transform: translateY(-26px) scale(.95); } }
+
+/* ───────── v3.2: vehicle tab ───────── */
+.vcard { border-radius: 22px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.vhead { display: flex; align-items: center; gap: 12px; } .vhead svg { color: var(--teal); flex-shrink: 0; }
+.vhead div { flex: 1; min-width: 0; } .vhead b { display: block; font-size: 19px; font-weight: 800; } .vhead span { color: var(--muted); font-size: 13px; }
+.vstats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.vstats div { background: rgba(0,0,0,.2); border: 1px solid var(--line); border-radius: 14px; padding: 9px 10px; }
+.vstats span { display: block; font-size: 11px; color: var(--muted); font-weight: 700; } .vstats b { font-size: 14px; font-weight: 800; }
+.vdue { display: flex; align-items: center; gap: 7px; font-size: 13.5px; font-weight: 800; padding: 9px 12px; border-radius: 12px; background: rgba(245,158,11,.16); color: #fcd34d; border: 1px solid rgba(245,158,11,.4); }
+.vdue.overdue { background: rgba(244,63,94,.18); color: #fecdd3; border-color: rgba(244,63,94,.5); }
+.vgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.vtile { min-height: 96px; border-radius: 20px; background: var(--card); border: 1px solid var(--line); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); box-shadow: var(--shadow);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: 15px; font-weight: 800; cursor: pointer; padding: 10px; text-align: center; }
+.vtile svg { color: var(--teal); } .vtile:active { transform: scale(.96); background: rgba(45,212,191,.22); }
+.vrep { align-items: flex-start; } .vrep .chip { margin-inline-start: 4px; vertical-align: 1px; } .vnote { color: #fcd34d !important; display: flex; gap: 5px; align-items: center; margin-top: 3px; }
+.vurg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.vurg button { min-height: 78px; border-radius: 18px; background: var(--card); border: 2px solid var(--line); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 13.5px; font-weight: 800; cursor: pointer; padding: 6px; text-align: center; }
+.vurg.three button { min-height: 56px; font-size: 15px; }
+.vurg button.on { border-color: var(--teal); background: rgba(45,212,191,.22); box-shadow: 0 0 0 3px rgba(45,212,191,.18); }
+.vurg button.danger.on { border-color: var(--red); background: rgba(244,63,94,.28); box-shadow: 0 0 0 3px rgba(244,63,94,.2); }
+.vphoto { position: relative; min-height: 120px; border-radius: 20px; border: 2px dashed rgba(45,212,191,.55); background: rgba(45,212,191,.08) center/cover no-repeat; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: 16px; font-weight: 800; cursor: pointer; }
+.vphoto input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.vphoto svg { color: var(--teal); } .vphoto.has { border-style: solid; border-color: var(--green); } .vphoto.has svg { display: none; }
+.vphoto.has span { background: var(--green); color: #032620; width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; font-size: 24px; }
+.vinput { width: 100%; background: rgba(0,0,0,.25); border: 1px solid var(--line); color: var(--dark); border-radius: 16px; padding: 15px 16px; font: inherit; font-size: 20px; font-weight: 800; user-select: text; -webkit-user-select: text; }
+textarea.vinput { font-size: 16px; font-weight: 600; resize: none; }
+.vinput:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 3px rgba(45,212,191,.2); }
+.vtoggle { width: 100%; min-height: 64px; border-radius: 18px; background: var(--card); border: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 16px; font-size: 16px; font-weight: 800; cursor: pointer; text-align: start; }
+.vtoggle svg { color: var(--teal); flex-shrink: 0; } .vtoggle span { flex: 1; }
+.vtoggle i { width: 50px; height: 28px; border-radius: 20px; background: rgba(255,255,255,.16); position: relative; transition: background .15s; flex-shrink: 0; }
+.vtoggle i::after { content: ''; position: absolute; top: 3px; inset-inline-start: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.vtoggle.on { border-color: var(--teal); } .vtoggle.on i { background: var(--teal-d); } .vtoggle.on i::after { transform: translateX(22px); } [dir=rtl] .vtoggle.on i::after { transform: translateX(-22px); }
+.wide-btn:disabled { opacity: .55; }
+.minibtn { border: 1px solid var(--line); background: var(--card2); color: #fff; font-weight: 800; font-size: 13px; padding: 9px 14px; border-radius: 12px; cursor: pointer; flex-shrink: 0; }
+.tab { font-size: 11.5px; }
+#v-paybox { display: flex; flex-direction: column; gap: 12px; }

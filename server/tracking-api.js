@@ -2,7 +2,8 @@ const tracking = require('./tracking');
 const { q } = require('./db');
 const jwt = require('jsonwebtoken');
 const { checkGeofenceForDriver } = require('./ops-features');
-const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+require('./security').ensureSecret();
+const SECRET = process.env.JWT_SECRET;
 
 let push;
 try {
@@ -55,7 +56,7 @@ function mountTrackingRoutes(r, io) {
 
     let geofence = [];
     if (!skipped) {
-      io.emit('driver:location', position);
+      io.to('staff').emit('driver:location', position);
       if (vehicle_id) io.to('vehicle:' + vehicle_id).emit('driver:location', position);
 
       try {

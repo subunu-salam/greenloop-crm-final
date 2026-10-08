@@ -57,7 +57,7 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 15000);
-const sock = io();
+const sock = io({ auth: { token } });
 sock.on('connect', () => sock.emit('ops:join'));
 sock.on('driver:location', upsert);
 </script>
