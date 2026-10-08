@@ -237,3 +237,33 @@ textarea.vinput { font-size: 16px; font-weight: 600; resize: none; }
 .minibtn { border: 1px solid var(--line); background: var(--card2); color: #fff; font-weight: 800; font-size: 13px; padding: 9px 14px; border-radius: 12px; cursor: pointer; flex-shrink: 0; }
 .tab { font-size: 11.5px; }
 #v-paybox { display: flex; flex-direction: column; gap: 12px; }
+
+/* ───────── v3.3: shift clock, job timers, arrival proof ───────── */
+.shiftcard { border-radius: 22px; padding: 16px; background: var(--card); border: 1px solid var(--line); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 12px; }
+.shiftcard.off { border-color: rgba(45,212,191,.45); }
+.sh-text b { display: block; font-size: 18px; font-weight: 800; } .sh-text span { font-size: 13.5px; color: var(--muted); }
+.shiftcard .giant { min-height: 96px; }
+.sh-row { display: flex; align-items: center; gap: 8px; }
+.sh-dot { width: 10px; height: 10px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 0 4px rgba(74,222,128,.2); flex-shrink: 0; }
+.sh-lbl { flex: 1; font-size: 14px; font-weight: 700; color: #bbf7d0; }
+.sh-time { font-size: 46px; font-weight: 800; letter-spacing: -.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+.sh-stats { display: flex; gap: 18px; font-size: 13px; color: var(--muted); } .sh-stats b { color: var(--dark); font-size: 15px; font-variant-numeric: tabular-nums; }
+.minibtn { display: inline-flex; align-items: center; gap: 6px; }
+.flow-hint { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; color: #fcd34d; padding: 2px 4px; }
+.jobtimer { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; color: var(--muted); padding: 0 4px; }
+.jobtimer svg { color: var(--teal); } .jobtimer .tmr { margin-inline-start: auto; font-size: 26px; color: var(--dark); font-variant-numeric: tabular-nums; }
+.jobtimer.inline { padding: 0; font-size: 13.5px; gap: 6px; } .jobtimer.inline .tmr { margin: 0; font-size: 17px; }
+.giant.blue { background: linear-gradient(135deg, #0ea5e9, #0369a1); min-height: 88px; font-size: 18px; text-decoration: none; } .giant.blue svg { width: 30px; height: 30px; }
+.giant small { font-size: 13.5px; font-weight: 600; opacity: .9; }
+.arrival { display: flex; gap: 12px; align-items: center; border-radius: 20px; padding: 12px; background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.45); }
+.arrival img { width: 84px; height: 84px; object-fit: cover; border-radius: 14px; flex-shrink: 0; }
+.arrival div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.arrival b { display: flex; align-items: center; gap: 6px; font-size: 16px; color: #bbf7d0; } .arrival span { font-size: 13px; color: var(--muted); }
+.sheet-wrap { position: fixed; inset: 0; z-index: 95; background: rgba(2,12,10,.6); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); display: flex; align-items: flex-end; justify-content: center; padding: 12px; }
+.sheet { width: 100%; max-width: 456px; background: rgba(8,40,35,.96); border: 1px solid var(--line); border-radius: 24px; padding: 20px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 -10px 50px -10px rgba(0,0,0,.7); }
+.sheet h3 { font-size: 20px; font-weight: 800; }
+.sheet dl { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; margin: 0; font-size: 15px; }
+.sheet dt { color: var(--muted); } .sheet dd { margin: 0; font-weight: 800; font-variant-numeric: tabular-nums; } .sheet dd.warn { color: #fcd34d; }
+.sh-warn { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; font-weight: 700; color: #fecdd3; background: rgba(244,63,94,.14); border: 1px solid rgba(244,63,94,.4); border-radius: 14px; padding: 10px 12px; }
+/* actions sit right under the address, the step guide below them: no scrolling to reach the next button */
+.jobbody > .jobmeta { order: 1; } .jobbody > #job-actions { order: 2; } .jobbody > .stepper { order: 3; }

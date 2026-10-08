@@ -61,6 +61,61 @@ function ruleLabel(r) {
   return `Monthly on day ${r.date}`;
 }
 
+// ── service frequency (v3.3) ─────────────────────────────────
+// How often a service happens is picked as a number + per day / week / month.
+// The visits a month, and so the price, follow from it (same rules as the server):
+//   daily n → n × 30 · weekly n → n × 52 ÷ 12 rounded · monthly n → n
+const FREQ = { daily: { max: 3, per: 'day' }, weekly: { max: 7, per: 'week' }, monthly: { max: 28, per: 'month' } };
+const visitsPerMonth = (unit, n) => unit === 'daily' ? n * 30 : unit === 'weekly' ? Math.round(n * 52 / 12) : n;
+function freqLabel(unit, n) {
+  if (!FREQ[unit]) return '—';
+  if (unit === 'daily' && n === 1) return 'Every day';
+  return n === 1 ? `Once a ${FREQ[unit].per}` : n === 2 ? `Twice a ${FREQ[unit].per}` : `${n} times a ${FREQ[unit].per}`;
+}
+// stored as "weekly:3"; older leads hold free text such as "3× weekly" or "weekly"
+function parseFreq(v) {
+  const s = String(v || '').toLowerCase();
+  let m = /^(daily|weekly|monthly):(\d{1,2})$/.exec(s);
+  if (!m) { const u = /(dai|day)/.test(s) ? 'daily' : /(month)/.test(s) ? 'monthly' : /(week)/.test(s) ? 'weekly' : null; const n = /(\d{1,2})/.exec(s); if (u) m = [0, u, n ? n[1] : 1]; }
+  if (!m) return null;
+  const unit = m[1], count = Math.min(FREQ[unit].max, Math.max(1, Number(m[2]) || 1));
+  return { unit, count };
+}
+const freqText = v => { const f = parseFreq(v); return f ? freqLabel(f.unit, f.count) : (v || '—'); };
+// a visit count from an older quotation → the nearest frequency that gives the same count
+function freqFromVisits(qty) {
+  const n = Math.round(Number(qty) || 1);
+  if (n % 30 === 0 && n / 30 <= 3) return { unit: 'daily', count: n / 30 };
+  for (let w = 1; w <= 6; w++) if (visitsPerMonth('weekly', w) === n && n > 3) return { unit: 'weekly', count: w };
+  return { unit: 'monthly', count: Math.min(28, Math.max(1, n)) };
+}
+// the control: [−] 3 [+] times a [day|week|month]
+function freqControl(f, id) {
+  f = f || { unit: 'weekly', count: 1 };
+  return `<div class="freq" ${id ? `id="${id}"` : ''} data-unit="${f.unit}" data-count="${f.count}" role="group" aria-label="How often">
+    <div class="fq-num"><button type="button" onclick="fqStep(this,-1)" aria-label="Fewer">−</button><output>${f.count}</output><button type="button" onclick="fqStep(this,1)" aria-label="More">+</button></div>
+    <span class="fq-x">${f.count === 1 ? 'time a' : 'times a'}</span>
+    <div class="fq-unit">${Object.entries(FREQ).map(([u, d]) => `<button type="button" class="${u === f.unit ? 'on' : ''}" data-u="${u}" onclick="fqUnit(this)">${d.per}</button>`).join('')}</div>
+  </div>`;
+}
+const fqRead = el => ({ unit: el.dataset.unit, count: Number(el.dataset.count) });
+function fqSet(el, unit, count) {
+  count = Math.min(FREQ[unit].max, Math.max(1, count));
+  el.dataset.unit = unit; el.dataset.count = count;
+  el.querySelector('output').textContent = count;
+  el.querySelector('.fq-x').textContent = count === 1 ? 'time a' : 'times a';
+  el.querySelectorAll('.fq-unit button').forEach(b => b.classList.toggle('on', b.dataset.u === unit));
+}
+function fqStep(btn, d) { const el = btn.closest('.freq'); fqSet(el, el.dataset.unit, Number(el.dataset.count) + d); fqChanged(el); }
+// a new unit starts again from once: "4 times a week" must not silently become "4 times a day"
+function fqUnit(btn) { const el = btn.closest('.freq'); if (btn.dataset.u === el.dataset.unit) return; fqSet(el, btn.dataset.u, 1); fqChanged(el); }
+function fqChanged(el) {
+  const line = el.closest('.qline');
+  if (!line) return;
+  if (line === document.querySelector('#qb-body .qline')) qbPlanFromLine();
+  qbCalc();
+}
+
 // ═══════════════════ PIPELINE DASHBOARD (CRM-16) ═════════════
 async function pipeline() {
   killCharts();
@@ -161,10 +216,10 @@ async function leadForm(l = {}) {
     <div class="fgrid">
       ${field('Contact name *', `<input id="l-contact" value="${esc(l.contact || '')}">`)}
       ${field('Company', `<input id="l-company" value="${esc(l.company || '')}">`)}
-      ${field('Phone (WhatsApp) *', `<input id="l-phone" value="${esc(l.phone || '')}" placeholder="+9715…">`)}
-      ${field('Email', `<input id="l-email" value="${esc(l.email || '')}">`)}
+      ${field('Mobile number *', GLPhone.html('l-phone', l.phone))}
+      ${field('Email (quotations are sent here)', `<input id="l-email" type="email" inputmode="email" autocomplete="off" value="${esc(l.email || '')}" placeholder="name@company.ae" onblur="leadCheck(${l.id || 'null'})">`)}
       ${field('Service type', `<select id="l-svc">${_services.map(s => `<option value="${s.code}" ${l.service_type === s.code ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`)}
-      ${field('Frequency wanted', `<input id="l-freq" value="${esc(l.frequency || '')}" placeholder="e.g. 3× weekly">`)}
+      ${field('How often', freqControl(parseFreq(l.frequency) || { unit: 'weekly', count: 1 }, 'l-freq'))}
       ${field('Source', `<select id="l-src">${SOURCES.map(s => `<option ${l.source === s ? 'selected' : ''}>${s}</option>`).join('')}</select>`)}
       ${field('Follow-up', `<input id="l-fu" type="datetime-local" value="${l.follow_up_at ? String(l.follow_up_at).slice(0, 16) : ''}">`)}
     </div>
@@ -172,8 +227,21 @@ async function leadForm(l = {}) {
       <div id="l-sites">${sites.map(siteRow).join('')}</div>
       <button class="btn ghost small" type="button" onclick="document.getElementById('l-sites').insertAdjacentHTML('beforeend', siteRow())">${icon('plus', 12)} Add site</button></div>
     ${field('Notes', `<textarea id="l-notes">${esc(l.notes || '')}</textarea>`)}
+    <div id="m-dup"></div>
     <button class="btn primary full" onclick="saveLead(${l.id || 'null'})">Save lead</button>
     <p id="m-err" class="err"></p>`, true);
+  $('#l-phone').addEventListener('blur', () => leadCheck(l.id || null));
+}
+// tells the user while they type that a mobile number / email is already in the CRM
+async function leadCheck(id) {
+  const box = $('#m-dup'); if (!box) return;
+  const ph = GLPhone.read('l-phone'), email = ($('#l-email').value || '').trim();
+  if (!ph.ok || (ph.empty && !email)) { box.innerHTML = ''; return; }
+  try {
+    const r = await api(`/contacts/check?lead_id=${id || ''}${ph.empty ? '' : '&phone=' + encodeURIComponent(ph.e164)}${email ? '&email=' + encodeURIComponent(email) : ''}`);
+    if (!$('#m-dup')) return;
+    box.innerHTML = r.duplicate ? duplicateBox({ message: r.duplicate.message, data: { duplicate: r.duplicate } }) : r.error && r.field === 'email' ? `<div class="dupbox"><p>${esc(r.error)}</p></div>` : '';
+  } catch { /* the save itself still checks */ }
 }
 async function saveLead(id) {
   const sites = [...document.querySelectorAll('#l-sites .site-row')].map(r => ({
@@ -183,12 +251,19 @@ async function saveLead(id) {
     address: r.querySelector('.s-addr').value.trim(),
   })).filter(s => s.name || s.address);
   const fu = $('#l-fu').value;
-  const body = { contact: $('#l-contact').value.trim(), company: $('#l-company').value.trim(), phone: $('#l-phone').value.trim(), email: $('#l-email').value.trim(),
-    service_type: $('#l-svc').value, frequency: $('#l-freq').value, source: $('#l-src').value, follow_up_at: fu ? new Date(fu).toISOString() : null, notes: $('#l-notes').value, sites };
+  $('#m-err').textContent = '';
+  const ph = GLPhone.read('l-phone');
+  if (!ph.ok) { $('#m-err').textContent = ph.error; $('#l-phone').focus(); return; }
+  const fq = fqRead($('#l-freq'));
+  const body = { contact: $('#l-contact').value.trim(), company: $('#l-company').value.trim(), phone: ph.e164, email: $('#l-email').value.trim(),
+    service_type: $('#l-svc').value, frequency: `${fq.unit}:${fq.count}`, source: $('#l-src').value, follow_up_at: fu ? new Date(fu).toISOString() : null, notes: $('#l-notes').value, sites };
   try {
     const r = await api(id ? '/leads/' + id : '/leads', { method: id ? 'PUT' : 'POST', body });
-    closeModal(); toast('Lead saved'); if (!id) leadDetail(r.id); else if (currentPage === 'leads') leads();
-  } catch (e) { $('#m-err').textContent = e.message; }
+    closeModal(); toast('Lead saved', 'success'); if (!id) leadDetail(r.id); else if (currentPage === 'leads') leads();
+  } catch (e) {
+    if (e.data && e.data.duplicate) $('#m-dup').innerHTML = duplicateBox(e);
+    else $('#m-err').textContent = e.message;
+  }
 }
 async function leadDetail(id) {
   await services();
@@ -198,8 +273,9 @@ async function leadDetail(id) {
     <div class="row spread"><h3 style="margin:0">${esc(l.company || l.contact)}</h3><span class="pill ${l.stage}">${STAGE_LABEL[l.stage]}</span></div>
     <div class="kv" style="margin:14px 0">
       <span>Contact</span><div>${esc(l.contact)}</div>
-      <span>Phone / email</span><div>${esc(l.phone)} ${esc(l.email || '')}</div>
-      <span>Service</span><div>${esc(svcName(l.service_type))} · ${esc(l.frequency || '—')}</div>
+      <span>Mobile</span><div>${esc(GLPhone.format(l.phone)) || '—'}</div>
+      <span>Email</span><div>${esc(l.email || '—')}</div>
+      <span>Service</span><div>${esc(svcName(l.service_type))}, ${esc(freqText(l.frequency)).toLowerCase()}</div>
       <span>Source</span><div>${esc(l.source)}</div>
       <span>Sites</span><div>${l.sites.map(s => `${esc(s.name)} <span class="zone-tag">${esc(s.zone || '?')}</span> <span class="muted small">${s.lat !== '' && s.lat != null ? s.lat + ', ' + s.lng : 'no coordinates'}</span>`).join('<br>') || '—'}</div>
       ${l.notes ? `<span>Notes</span><div>${esc(l.notes)}</div>` : ''}
@@ -223,34 +299,39 @@ function mailBanner(m) {
   if (!m) return '';
   return m.configured
     ? `<div class="banner ok">${icon('mail', 16)}<div>Gmail connected — quotations are emailed from <b>${esc(m.sender || 'your Gmail account')}</b> (${m.mode === 'api' ? 'Gmail API' : 'Gmail SMTP'}).</div></div>`
-    : `<div class="banner">${icon('mail', 16)}<div><b>Gmail is not connected on the server yet.</b> “Send via Gmail” opens a ready-written Gmail message for you to press Send. To send automatically, add a Gmail account in the server settings (see README → Gmail).</div></div>`;
+    : `<div class="banner">${icon('mail', 16)}<div><b>Gmail is not connected on the server yet.</b> After the preview, Send opens the message in your own Gmail for you to send. To send straight from here, add a Gmail account in the server settings (README, Gmail section).</div></div>`;
 }
+let quoteFilter = 'all';
 async function quotations() {
   const [rows, mail] = await Promise.all([api('/quotations'), api('/mail/status').catch(() => null)]);
+  const by = st => rows.filter(q => q.status === st);
   const open = rows.filter(q => ['draft', 'sent'].includes(q.status));
+  const stages = [
+    ['draft', 'Send by Gmail', by('draft').length, by('draft').length === 1 ? 'draft to preview and send' : 'drafts to preview and send'],
+    ['sent', 'Waiting for the customer', by('sent').length, `${AED(by('sent').reduce((a, q) => a + q.total, 0))} quoted`],
+    ['accepted', 'Approve and register', by('accepted').length, 'accepted, ready to become customers'],
+    ['converted', 'Invoiced in the customer app', by('converted').length, 'registered customers'],
+  ];
+  const shown = quoteFilter === 'all' ? rows : rows.filter(q => q.status === quoteFilter);
   $('#main').innerHTML = `
-    <div class="head"><div><h1>Quotations</h1><p class="sub">Numbered, versioned quotes with VAT 5%. Sent by Gmail with a view / PDF / accept link; accepted quotes convert to a registered customer in one click.</p></div>
+    <div class="head"><div><h1>Quotations</h1><p class="sub">Priced from how often each service happens. Every email is previewed before it goes to the customer.</p></div>
       <button class="btn primary" onclick="pickLeadForQuote()">${icon('plus', 13)} New quotation</button></div>
-    <div class="flow">
-      <div class="flow-step"><span class="n">1</span><span class="cnt">${rows.filter(q => q.status === 'draft').length}</span><span class="k">Step 1</span><b>Send quotation via Gmail</b><small>Free Gmail account · drafts waiting to be sent</small></div>
-      <div class="flow-step"><span class="n">2</span><span class="cnt">${rows.filter(q => q.status === 'accepted').length}</span><span class="k">Step 2</span><b>Lead approval & customer registration</b><small>Accepted quotes ready to convert</small></div>
-      <div class="flow-step"><span class="n">3</span><span class="cnt">${rows.filter(q => q.status === 'converted').length}</span><span class="k">Step 3</span><b>Invoice & PDF via customer app</b><small>Converted customers · invoices are pushed to the app</small></div>
-    </div>
-    ${mailBanner(mail)}
-    <div class="kpis">
-      <div class="kpi amber"><div class="num">${open.length}</div><div class="lbl">Open quotes</div></div>
-      <div class="kpi violet"><div class="num" style="font-size:24px">${AED(open.reduce((a, q) => a + q.total, 0))}</div><div class="lbl">Open value</div></div>
-      <div class="kpi green"><div class="num">${rows.filter(q => q.status === 'accepted').length}</div><div class="lbl">Accepted — ready to convert</div></div>
-      <div class="kpi"><div class="num">${rows.filter(q => q.status === 'converted').length}</div><div class="lbl">Converted</div></div>
-    </div>
-    <div class="card scroll-x">${rows.length ? `<table><tr><th>Number</th><th>Client</th><th>Total</th><th>Valid until</th><th>Sent</th><th>Status</th><th></th></tr>
-      ${rows.map(q => `<tr><td><b>${esc(q.number)}</b> <span class="muted small">v${q.version}</span></td>
-        <td>${esc(q.lead?.company || q.lead?.contact || '—')}<br><span class="muted small">${esc(q.lead?.contact || '')}</span></td>
-        <td><b>${AED(q.total)}</b></td><td class="small">${dmy(q.valid_until)}</td>
-        <td class="small muted">${q.sent_at ? `${icon(q.sent_via === 'gmail' ? 'mail' : 'send', 12)} ${esc(q.sent_via)} · ${dmyTime(q.sent_at)}${q.sent_to ? '<br>' + esc(q.sent_to) : ''}` : '<span class="pill draft">not sent</span>'}</td>
-        <td><span class="pill ${q.status}">${q.status}</span></td>
-        <td class="r" style="white-space:nowrap">${q.status === 'draft' ? `<button class="btn gmail small" onclick="sendQuoteForm(${q.id})">${icon('mail', 12)} Send</button> ` : ''}${q.status === 'accepted' ? `<button class="btn primary small" onclick="convertQuote(${q.id})">Convert</button> ` : ''}<button class="btn ghost small" onclick="quoteDetail(${q.id})">Open</button></td></tr>`).join('')}</table>`
-      : '<p class="empty">No quotations yet. Create one from a lead.</p>'}</div>`;
+    <div class="qpipe" role="tablist" aria-label="Quotation stage">${stages.map(([st, label, n, sub]) => `
+      <button role="tab" aria-selected="${quoteFilter === st}" class="${quoteFilter === st ? 'on' : ''}" onclick="quoteFilter=quoteFilter==='${st}'?'all':'${st}';quotations()">
+        <span class="n">${n}</span><span class="l">${label}</span><span class="s">${sub}</span></button>`).join('')}</div>
+    ${mail && !mail.configured ? mailBanner(mail) : ''}
+    <div class="card qlist">${shown.length ? shown.map(q => `
+      <div class="qrow" onclick="quoteDetail(${q.id})" tabindex="0" onkeydown="if(event.key==='Enter')quoteDetail(${q.id})">
+        <div class="who"><b>${esc(q.lead?.company || q.lead?.contact || 'No lead')}</b>
+          <span>${esc(q.number)}${q.version > 1 ? ', version ' + q.version : ''} for ${esc(q.lead?.contact || '—')}</span></div>
+        <div class="what">${q.items.slice(0, 2).map(i => `<span>${esc(i.description || svcName(i.service_code))}${i.frequency ? ', ' + esc(i.frequency).toLowerCase() : ''}</span>`).join('')}${q.items.length > 2 ? `<span>and ${q.items.length - 2} more</span>` : ''}</div>
+        <div class="when">${q.sent_at ? `Sent ${dmy(q.sent_at)}${q.sent_to ? '<span>' + esc(q.sent_to) + '</span>' : ''}` : 'Not sent yet'}<span>Valid until ${dmy(q.valid_until)}</span></div>
+        <div class="amt"><b>${AED(q.total)}</b><span>${q.items.every(i => i.freq_unit) ? 'a month, with VAT' : 'with VAT'}</span></div>
+        <div class="st"><span class="pill ${q.status}">${q.status}</span>
+          ${q.status === 'draft' ? `<button class="btn primary small" onclick="event.stopPropagation();sendQuoteForm(${q.id})">Preview and send</button>` : ''}
+          ${q.status === 'accepted' ? `<button class="btn primary small" onclick="event.stopPropagation();convertQuote(${q.id})">Register customer</button>` : ''}</div>
+      </div>`).join('') : `<p class="empty">${rows.length ? 'No quotations at this stage.' : 'No quotations yet. Create one from a lead.'}</p>`}</div>
+    <p class="muted small" style="margin-top:10px">${open.length} open, worth ${AED(open.reduce((a, q) => a + q.total, 0))}. Dates are day/month/year.</p>`;
 }
 async function pickLeadForQuote() {
   const ls = (await api('/leads')).filter(l => !['won', 'lost'].includes(l.stage));
@@ -259,119 +340,236 @@ async function pickLeadForQuote() {
     ${field('Lead', `<select id="pick-lead">${ls.map(l => `<option value="${l.id}">${esc(l.company || l.contact)} — ${esc(l.contact)}</option>`).join('')}</select>`)}
     <button class="btn primary full" onclick="const v=+document.getElementById('pick-lead').value;quoteForm({ lead_id: v })">Continue</button>`);
 }
+// One priced line: what, where, how often → visits a month × price a visit.
 function qbRow(it = {}) {
-  return `<tr>
-    <td><select class="qi-svc" onchange="qbPrice(this)">${_services.map(s => `<option value="${s.code}" data-price="${s.default_price}" ${it.service_code === s.code ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></td>
-    <td><input class="qi-desc" value="${esc(it.description || '')}" placeholder="Description"></td>
-    <td><input class="qi-site" value="${esc(it.site || '')}" placeholder="All sites"></td>
-    <td style="width:78px"><input class="qi-qty" type="number" min="0" value="${it.qty ?? 1}" oninput="qbCalc()"></td>
-    <td style="width:100px"><input class="qi-unit" type="number" min="0" step="0.01" value="${it.unit_price ?? _services[0].default_price}" oninput="qbCalc()"></td>
-    <td class="r qi-line" style="width:110px">—</td>
-    <td style="width:34px"><button class="btn ghost small" onclick="this.closest('tr').remove();qbCalc()" aria-label="Remove line">${icon('x', 12)}</button></td></tr>`;
+  const f = it.freq_unit ? { unit: it.freq_unit, count: it.freq_count } : it.qty ? freqFromVisits(it.qty) : { unit: 'weekly', count: 1 };
+  return `<div class="qline">
+    <div class="ql-what">
+      <select class="qi-svc" aria-label="Service" onchange="qbPrice(this)">${_services.map(s => `<option value="${s.code}" data-price="${s.default_price}" ${it.service_code === s.code ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>
+      <input class="qi-desc" value="${esc(it.description || '')}" placeholder="Description on the quotation" aria-label="Description">
+      <input class="qi-site" value="${esc(it.site || '')}" placeholder="All sites" aria-label="Site">
+      <button class="btn ghost small ql-x" type="button" onclick="qbRemove(this)" aria-label="Remove line">${icon('x', 12)}</button>
+    </div>
+    <div class="ql-price">
+      ${freqControl(f)}
+      <span class="ql-eq"><b class="qi-visits">—</b> a month</span>
+      <label class="ql-unit"><span>AED a visit</span><input class="qi-unit" type="number" min="0" step="0.01" inputmode="decimal" value="${it.unit_price ?? _services[0].default_price}" oninput="qbCalc()"></label>
+      <span class="ql-total"><span>a month</span><b class="qi-line">—</b></span>
+    </div></div>`;
 }
-function qbPrice(sel) { const tr = sel.closest('tr'); tr.querySelector('.qi-unit').value = sel.selectedOptions[0].dataset.price; if (!tr.querySelector('.qi-desc').value) tr.querySelector('.qi-desc').value = sel.selectedOptions[0].textContent; qbCalc(); }
+function qbRemove(btn) {
+  if (document.querySelectorAll('#qb-body .qline').length < 2) return toast('A quotation needs at least one line', 'warning');
+  btn.closest('.qline').remove(); qbCalc();
+}
+function qbPrice(sel) { const ln = sel.closest('.qline'); ln.querySelector('.qi-unit').value = sel.selectedOptions[0].dataset.price; if (!ln.querySelector('.qi-desc').value) ln.querySelector('.qi-desc').value = sel.selectedOptions[0].textContent; qbCalc(); }
 function qbItems() {
-  return [...document.querySelectorAll('#qb-body tr')].map(tr => ({ service_code: tr.querySelector('.qi-svc').value, description: tr.querySelector('.qi-desc').value,
-    site: tr.querySelector('.qi-site').value, qty: Number(tr.querySelector('.qi-qty').value), unit_price: Number(tr.querySelector('.qi-unit').value) }));
+  return [...document.querySelectorAll('#qb-body .qline')].map(ln => { const f = fqRead(ln.querySelector('.freq')); return { service_code: ln.querySelector('.qi-svc').value, description: ln.querySelector('.qi-desc').value,
+    site: ln.querySelector('.qi-site').value, freq_unit: f.unit, freq_count: f.count, unit_price: Number(ln.querySelector('.qi-unit').value) }; });
 }
 function qbCalc() {
   let sub = 0;
-  document.querySelectorAll('#qb-body tr').forEach(tr => {
-    const v = (Number(tr.querySelector('.qi-qty').value) || 0) * (Number(tr.querySelector('.qi-unit').value) || 0);
-    sub += v; tr.querySelector('.qi-line').textContent = v.toFixed(2);
+  document.querySelectorAll('#qb-body .qline').forEach(ln => {
+    const f = fqRead(ln.querySelector('.freq')), visits = visitsPerMonth(f.unit, f.count);
+    const v = Math.round(visits * (Number(ln.querySelector('.qi-unit').value) || 0) * 100) / 100;
+    sub += v;
+    ln.querySelector('.qi-visits').textContent = `${visits} visit${visits === 1 ? '' : 's'}`;
+    ln.querySelector('.qi-line').textContent = AED(v);
   });
   const vat = Math.round(sub * 5) / 100;
   $('#qb-sub').textContent = AED(sub); $('#qb-vat').textContent = AED(vat); $('#qb-tot').textContent = AED(sub + vat);
 }
+// The visit days follow the first line; ticking different days updates that line's frequency.
+const SPREAD_DAYS = { 1: [1], 2: [0, 3], 3: [0, 2, 4], 4: [0, 1, 3, 4], 5: [0, 1, 2, 3, 4], 6: [6, 0, 1, 2, 3, 4], 7: [0, 1, 2, 3, 4, 5, 6] };
+function qbPlanFromLine() {
+  const first = document.querySelector('#qb-body .qline .freq'); if (!first || !$('#rc-type')) return;
+  const f = fqRead(first);
+  $('#rc-type').value = f.unit;
+  if (f.unit === 'daily') $('#rc-wd').checked = false;
+  if (f.unit === 'weekly' && document.querySelectorAll('.rc-day:checked').length !== f.count)
+    document.querySelectorAll('.rc-day').forEach(c => { c.checked = SPREAD_DAYS[f.count].includes(Number(c.value)); });
+  rcToggle();
+}
+function qbLineFromPlan() {
+  const first = document.querySelector('#qb-body .qline .freq'); if (!first || !$('#rc-type')) return;
+  const t = $('#rc-type').value, cur = fqRead(first);
+  if (t === 'daily' && $('#rc-wd').checked) {
+    // Monday to Friday is five visits a week, and is priced as that
+    $('#rc-type').value = 'weekly'; $('#rc-wd').checked = false;
+    document.querySelectorAll('.rc-day').forEach(c => { c.checked = [1, 2, 3, 4, 5].includes(Number(c.value)); });
+    rcToggle(); fqSet(first, 'weekly', 5);
+    toast('Monday to Friday is priced as 5 times a week', 'info');
+  } else if (t === 'daily') fqSet(first, 'daily', cur.unit === 'daily' ? cur.count : 1);
+  else if (t === 'weekly') { const n = document.querySelectorAll('.rc-day:checked').length; if (n) fqSet(first, 'weekly', n); }
+  else if (cur.unit !== 'monthly') fqSet(first, 'monthly', 1);
+  qbCalc();
+}
+document.addEventListener('change', e => { if (document.getElementById('qb-body') && e.target.matches && e.target.matches('#rc-type, .rc-day, #rc-wd')) qbLineFromPlan(); });
+
 async function quoteForm(q = {}) {
   await services();
   const lead = await api('/leads/' + q.lead_id);
-  const items = q.items && q.items.length ? q.items : [{ service_code: lead.service_type, description: svcName(lead.service_type), qty: 4, unit_price: (_services.find(s => s.code === lead.service_type) || _services[0]).default_price }];
+  const want = parseFreq(lead.frequency) || { unit: 'weekly', count: 1 };
+  const items = q.items && q.items.length ? q.items : [{ service_code: lead.service_type, description: svcName(lead.service_type), freq_unit: want.unit, freq_count: want.count, unit_price: (_services.find(s => s.code === lead.service_type) || _services[0]).default_price }];
   const plan = q.plan || {};
-  const valid = q.revise_of ? '' : '';
   openModal(`
-    <h3>${q.revise_of ? `Revise ${esc(q.number)} → new version` : 'New quotation'} <span class="muted small">for ${esc(lead.company || lead.contact)}</span></h3>
-    <div class="scroll-x"><table class="qb"><tr><th>Service</th><th>Description</th><th>Site</th><th>Visits</th><th>Unit AED</th><th class="r">Line</th><th></th></tr>
-      <tbody id="qb-body">${items.map(qbRow).join('')}</tbody></table></div>
-    <button class="btn ghost small" onclick="document.getElementById('qb-body').insertAdjacentHTML('beforeend', qbRow());qbCalc()">${icon('plus', 12)} Add line</button>
-    <table class="qtot"><tr><td>Subtotal</td><td class="r" id="qb-sub">—</td></tr><tr><td>VAT 5%</td><td class="r" id="qb-vat">—</td></tr><tr class="g"><td>Total</td><td class="r" id="qb-tot">—</td></tr></table>
-    <h3 style="font-size:14px;margin-top:6px">${icon('repeat', 14)} Service plan created on conversion</h3>
-    ${recurrenceFields(plan.recurrence, plan.time_window)}
+    <h3>${q.revise_of ? `Revise ${esc(q.number)}` : 'New quotation'} <span class="muted small">for ${esc(lead.company || lead.contact)}</span></h3>
+    <p class="muted small" style="margin:-8px 0 12px">Choose how often each service happens. The visits a month and the price are worked out for you.</p>
+    <div id="qb-body">${items.map(qbRow).join('')}</div>
+    <button class="btn ghost small" type="button" onclick="document.getElementById('qb-body').insertAdjacentHTML('beforeend', qbRow());qbCalc()">${icon('plus', 12)} Add a service</button>
+    <table class="qtot"><tr><td>Subtotal a month</td><td class="r" id="qb-sub">—</td></tr><tr><td>VAT 5%</td><td class="r" id="qb-vat">—</td></tr><tr class="g"><td>Total a month</td><td class="r" id="qb-tot">—</td></tr></table>
+    <h3 style="font-size:14px;margin-top:6px">${icon('repeat', 14)} Visit days</h3>
+    <p class="muted small" style="margin:-8px 0 10px">Follows the first service above. Any other service is scheduled from its own frequency when the customer is registered.</p>
+    ${recurrenceFields(plan.recurrence || { type: 'weekly', days: SPREAD_DAYS[1] }, plan.time_window)}
     <div class="fgrid">
       ${field('Start date', `<input id="qb-start" type="date" value="${plan.start_date || ''}">`)}
-      ${field('Billing', `<select id="qb-bill"><option value="monthly" ${plan.billing !== 'per_visit' ? 'selected' : ''}>Monthly consolidated</option><option value="per_visit" ${plan.billing === 'per_visit' ? 'selected' : ''}>Per visit</option></select>`)}
-      ${field('Valid until', `<input id="qb-valid" type="date" value="${valid}" placeholder="30 days">`)}
+      ${field('Billing', `<select id="qb-bill"><option value="monthly" ${plan.billing !== 'per_visit' ? 'selected' : ''}>One invoice a month</option><option value="per_visit" ${plan.billing === 'per_visit' ? 'selected' : ''}>An invoice after each visit</option></select>`)}
+      ${field('Valid until (30 days if left empty)', `<input id="qb-valid" type="date" min="${today()}">`)}
     </div>
-    ${field('Notes / terms', `<textarea id="qb-notes">${esc(q.notes || '')}</textarea>`)}
+    ${field('Notes or terms shown on the quotation', `<textarea id="qb-notes">${esc(q.notes || '')}</textarea>`)}
     <button class="btn primary full" onclick="saveQuote(${q.lead_id}, ${q.revise_of || 'null'})">${q.revise_of ? 'Save new version' : 'Create quotation'}</button>
     <p id="m-err" class="err"></p>`, true);
+  if (!q.plan) qbPlanFromLine();
   qbCalc();
 }
 async function saveQuote(leadId, reviseOf) {
   const rc = readRecurrence();
   const body = { lead_id: leadId, revise_of: reviseOf, items: qbItems(), notes: $('#qb-notes').value, valid_until: $('#qb-valid').value || undefined,
     plan: { recurrence: rc.rule, time_window: rc.time_window, start_date: $('#qb-start').value || null, billing: $('#qb-bill').value } };
-  try { const r = await api('/quotations', { method: 'POST', body }); closeModal(); toast(`Quotation ${r.number} v${r.version} created`); quoteDetail(r.id); }
+  try { const r = await api('/quotations', { method: 'POST', body }); closeModal(); toast(`Quotation ${r.number} created. Preview it before sending.`, 'success'); quoteDetail(r.id); if (currentPage === 'quotations') quotations(); }
   catch (e) { $('#m-err').textContent = e.message; }
 }
+// Fit an iframe to the document inside it (same origin, no scripts run in it).
+function fitFrame(f) { try { f.style.height = Math.max(240, f.contentDocument.documentElement.scrollHeight + 2) + 'px'; } catch { f.style.height = '640px'; } }
+// The quotation as the customer sees it, beside what can be done with it.
 async function quoteDetail(id) {
   const q = await api('/quotations/' + id);
   const editable = ['draft', 'sent'].includes(q.status);
+  const docUrl = `${API}/quotations/${q.id}/pdf?embed=1&t=${encodeURIComponent(token)}`;
+  const sent = q.sent_at ? `Sent by ${({ gmail: 'Gmail', whatsapp: 'WhatsApp', pdf: 'PDF' })[q.sent_via] || esc(q.sent_via)} on ${dmyTime(q.sent_at)}${q.sent_to ? ' to ' + esc(q.sent_to) : ''}.` : 'Not sent to the customer yet.';
   openModal(`
-    <div class="row spread"><h3 style="margin:0">${esc(q.number)} <span class="muted small">v${q.version}</span></h3><span class="pill ${q.status}">${q.status}</span></div>
-    <p class="muted small" style="margin:4px 0 12px">${esc(q.lead?.company || '')} · ${esc(q.lead?.contact || '')} · valid until ${dmy(q.valid_until)}${q.sent_at ? ' · sent via ' + esc(q.sent_via) + (q.sent_to ? ' to ' + esc(q.sent_to) : '') + ' on ' + dmyTime(q.sent_at) : ' · not sent yet'}</p>
-    <table><tr><th>Service</th><th>Site</th><th class="r">Visits</th><th class="r">Unit</th><th class="r">Line</th></tr>
-      ${q.items.map(i => `<tr><td>${esc(i.description || i.service_code)}</td><td class="small">${esc(i.site || 'All')}</td><td class="r">${i.qty}</td><td class="r">${i.unit_price.toFixed(2)}</td><td class="r">${i.line_total.toFixed(2)}</td></tr>`).join('')}</table>
-    <table class="qtot"><tr><td>Subtotal</td><td class="r">${AED(q.subtotal)}</td></tr><tr><td>VAT 5%</td><td class="r">${AED(q.vat)}</td></tr><tr class="g"><td>Total</td><td class="r">${AED(q.total)}</td></tr></table>
-    <p class="small"><b>Plan:</b> ${esc(ruleLabel(q.plan.recurrence))} · window ${esc(q.plan.time_window)} · ${q.plan.billing === 'per_visit' ? 'billed per visit' : 'billed monthly'}</p>
-    <div class="row" style="margin-top:14px">
-      <button class="btn ghost" onclick="openDoc('/quotations/${q.id}/pdf?print=1')">${icon('download', 13)} PDF</button>
-      ${editable ? `<button class="btn gmail" onclick="sendQuoteForm(${q.id})">${icon('mail', 13)} ${q.sent_at ? 'Resend' : 'Send'} via Gmail</button>` : ''}
-      ${editable ? `<button class="btn ghost" onclick="quoteStatus(${q.id},'accepted')">Mark accepted</button><button class="btn ghost" onclick="quoteStatus(${q.id},'rejected')">Mark rejected</button>` : ''}
-      ${q.status === 'accepted' ? `<button class="btn primary" onclick="convertQuote(${q.id})">${icon('userCheck', 13)} Convert to customer</button>` : ''}
-      ${editable || q.status === 'expired' ? `<button class="btn ghost" onclick='quoteForm(${jsonAttr({ lead_id: q.lead_id, revise_of: q.id, number: q.number, items: q.items, plan: q.plan, notes: q.notes })})'>Revise (v${q.version + 1})</button>` : ''}
-    </div>
-    ${q.versions.length > 1 ? `<p class="muted small" style="margin-top:12px">Versions: ${q.versions.map(v => `<a href="#" onclick="quoteDetail(${v.id});return false">v${v.version} (${v.status}, ${AED(v.total)})</a>`).join(' · ')}</p>` : ''}
-    <div id="q-out"></div>`, true);
+    <div class="qdetail">
+      <div class="paper"><iframe title="Quotation ${esc(q.number)} as the customer sees it" src="${docUrl}" sandbox="allow-same-origin" onload="fitFrame(this)"></iframe></div>
+      <aside class="rail">
+        <h3>${esc(q.number)}</h3>
+        <p class="rail-st"><span class="pill ${q.status}">${q.status}</span>${q.version > 1 ? ` <span class="muted small">version ${q.version}</span>` : ''}</p>
+        <p class="muted small">${sent}</p>
+        ${q.lead && !q.lead.email && editable ? `<p class="small" style="color:var(--amber)">This lead has no email yet. You can type one when you send.</p>` : ''}
+        <div class="rail-acts">
+          ${editable ? `<button class="btn primary" onclick="sendQuoteForm(${q.id})">${icon('mail', 13)} ${q.sent_at ? 'Preview and resend' : 'Preview and send'}</button>` : ''}
+          ${q.status === 'accepted' ? `<button class="btn primary" onclick="convertQuote(${q.id})">${icon('userCheck', 13)} Register customer</button>` : ''}
+          ${editable || q.status === 'expired' ? `<button class="btn ghost" onclick='quoteForm(${jsonAttr({ lead_id: q.lead_id, revise_of: q.id, number: q.number, items: q.items, plan: q.plan, notes: q.notes })})'>${icon('edit', 13)} Revise</button>` : ''}
+          <button class="btn ghost" onclick="openDoc('/quotations/${q.id}/pdf?print=1')">${icon('download', 13)} Save as PDF</button>
+          ${editable ? `<button class="btn ghost" onclick="quoteStatus(${q.id},'accepted')">Mark accepted</button><button class="btn ghost" onclick="quoteStatus(${q.id},'rejected')">Mark rejected</button>` : ''}
+        </div>
+        ${q.versions.length > 1 ? `<p class="muted small rail-v">Versions<br>${q.versions.map(v => `<a href="#" onclick="quoteDetail(${v.id});return false">${v.version === q.version ? '<b>' : ''}v${v.version}, ${AED(v.total)}, ${v.status}${v.version === q.version ? '</b>' : ''}</a>`).join('<br>')}</p>` : ''}
+        <button class="btn ghost rail-close" onclick="closeModal()">Close</button>
+      </aside>
+    </div>`, 'xl');
 }
-// STEP 1 — send by Gmail. Shows the recipient first so a missing / wrong email is caught before sending.
+
+// STEP 1. Nothing is emailed until the sender has seen the exact message and confirmed it.
+let _pv = null;   // the preview currently on screen: { id, to, token, delivery }
 async function sendQuoteForm(id) {
-  const [q, mail] = await Promise.all([api('/quotations/' + id), api('/mail/status').catch(() => ({ configured: false }))]);
-  window._sqCompose = !mail.configured;
+  const q = await api('/quotations/' + id);
+  _pv = null;
   openModal(`
-    <h3>${icon('mail', 17)} Send ${esc(q.number)} v${q.version} via Gmail</h3>
-    <p class="muted small" style="margin-bottom:12px">${esc(q.lead?.company || q.lead?.contact || '')} · ${AED(q.total)} incl. VAT · valid until ${dmy(q.valid_until)}</p>
-    ${mailBanner(mail)}
-    ${field('To (customer email)', `<input id="sq-to" type="email" value="${esc(q.lead?.email || '')}" placeholder="name@company.ae" autocomplete="off">`)}
-    <p class="muted small" style="margin:-4px 0 12px">The email contains the quotation summary and one button to view it, download the PDF and accept online. ${q.lead?.email ? '' : '<b style="color:var(--amber)">This lead has no email saved — type it here.</b>'}</p>
-    <div class="row"><button class="btn gmail" id="sq-go" onclick="sendQuote(${id})">${icon('send', 13)} ${mail.configured ? 'Send email now' : 'Open in Gmail'}</button>
-      <button class="btn ghost" onclick="sendQuoteWa(${id})" title="Fallback only — Gmail is the standard channel">WhatsApp instead</button>
-      <button class="btn ghost" onclick="quoteDetail(${id})">Back</button></div>
-    <p id="m-err" class="err"></p>`);
+    <div class="pv">
+      <div class="pv-head"><h3>Preview before sending</h3>
+        <p class="muted small">${esc(q.number)} for ${esc(q.lead?.company || q.lead?.contact || '')}. This is exactly what the customer receives.</p></div>
+      <div class="pv-to"><label for="sq-to">Send to</label>
+        <input id="sq-to" type="email" inputmode="email" autocomplete="off" value="${esc(q.lead?.email || '')}" placeholder="name@company.ae" oninput="pvStale()" onkeydown="if(event.key==='Enter')loadPreview(${id})">
+        <button class="btn ghost" id="pv-refresh" onclick="loadPreview(${id})">Show preview</button></div>
+      <div id="pv-body"><p class="pv-empty">${q.lead?.email ? 'Loading the preview…' : 'Type the customer\'s email address, then choose Show preview.'}</p></div>
+      <div class="pv-foot">
+        <button class="btn primary" id="sq-go" disabled onclick="confirmSend(${id})">${icon('send', 13)} Send</button>
+        <button class="btn ghost" onclick="quoteDetail(${id})">Back to the quotation</button>
+        <button class="btn ghost pv-wa" onclick="sendQuoteWa(${id})" title="Gmail is the standard channel">Send on WhatsApp instead</button>
+      </div>
+      <p id="m-err" class="err"></p>
+      <div id="pv-confirm" class="confirm hidden" role="alertdialog" aria-modal="true" aria-labelledby="pvc-t"></div>
+    </div>`, 'xl');
+  if (q.lead?.email) loadPreview(id); else $('#sq-to').focus();
+}
+// the recipient was edited after the preview was made → it has to be previewed again
+function pvStale() {
+  if (!_pv) return;
+  const same = $('#sq-to').value.trim().toLowerCase() === _pv.to;
+  $('#sq-go').disabled = !same;
+  $('#pv-refresh').textContent = same ? 'Show preview' : 'Update preview';
+  $('#pv-body').classList.toggle('stale', !same);
+}
+async function loadPreview(id) {
+  $('#m-err').textContent = '';
+  const to = $('#sq-to').value.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) { $('#m-err').textContent = 'Enter a valid email address for the customer'; $('#sq-to').focus(); return; }
+  try {
+    const p = await api(`/quotations/${id}/preview`, { method: 'POST', body: { base_url: location.origin, to } });
+    _pv = { id, to: p.to, token: p.preview_token, delivery: p.delivery, subject: p.subject, total: p.quotation.total, number: p.quotation.number, customer: p.quotation.customer };
+    const docUrl = `${API}/quotations/${id}/pdf?embed=1&t=${encodeURIComponent(token)}`;
+    $('#pv-body').classList.remove('stale');
+    $('#pv-body').innerHTML = `
+      <div class="pv-tabs" role="tablist"><button role="tab" class="on" onclick="pvTab(this,'mail')">The email</button><button role="tab" onclick="pvTab(this,'doc')">The quotation it links to</button></div>
+      <div id="pv-mail" class="mailframe">
+        <dl><dt>From</dt><dd>${p.from ? esc(p.from_name) + ' &lt;' + esc(p.from) + '&gt;' : 'Your Gmail account'}</dd>
+          <dt>To</dt><dd>${esc(p.to)}</dd>${p.reply_to ? `<dt>Reply to</dt><dd>${esc(p.reply_to)}</dd>` : ''}
+          <dt>Subject</dt><dd><b>${esc(p.subject)}</b></dd></dl>
+        ${p.delivery === 'compose' ? `<pre class="mailtext"></pre>` : `<iframe title="Email preview" sandbox="allow-same-origin" onload="fitFrame(this)"></iframe>`}
+      </div>
+      <div id="pv-doc" class="paper hidden"><iframe title="Quotation preview" data-src="${docUrl}" sandbox="allow-same-origin" onload="fitFrame(this)"></iframe></div>
+      ${p.delivery === 'compose' ? `<p class="muted small" style="margin-top:8px">Gmail is not connected on the server, so Send opens this message in your own Gmail for you to send. It goes as plain text.</p>` : ''}`;
+    if (p.delivery === 'compose') $('#pv-mail .mailtext').textContent = p.text;
+    else $('#pv-mail iframe').srcdoc = p.html;
+    $('#sq-go').disabled = false;
+    $('#sq-go').innerHTML = `${icon('send', 13)} ${p.delivery === 'compose' ? 'Open in Gmail' : 'Send to ' + esc(p.to)}`;
+    $('#pv-refresh').textContent = 'Show preview';
+  } catch (e) { $('#m-err').textContent = e.message; }
+}
+function pvTab(btn, which) {
+  btn.parentElement.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === btn));
+  $('#pv-mail').classList.toggle('hidden', which !== 'mail'); $('#pv-doc').classList.toggle('hidden', which !== 'doc');
+  const f = $('#pv-doc iframe'); if (which === 'doc' && !f.src) f.src = f.dataset.src;
+}
+// the confirmation alert: one last look at who gets what
+function confirmSend(id) {
+  if (!_pv || _pv.id !== id) return;
+  const c = $('#pv-confirm');
+  c.innerHTML = `<div class="confirm-card">
+    <h3 id="pvc-t">Send this quotation?</h3>
+    <dl><dt>To</dt><dd>${esc(_pv.to)}</dd><dt>Customer</dt><dd>${esc(_pv.customer || '—')}</dd><dt>Quotation</dt><dd>${esc(_pv.number)}, ${AED(_pv.total)} with VAT</dd></dl>
+    <p class="muted small">${_pv.delivery === 'compose' ? 'Gmail opens with the message ready. It is logged as sent once Gmail opens.' : 'The customer gets the email you just previewed. This cannot be undone.'}</p>
+    <div class="row"><button class="btn primary" id="pvc-yes" onclick="sendQuote(${id})">${_pv.delivery === 'compose' ? 'Open in Gmail' : 'Send now'}</button>
+      <button class="btn ghost" onclick="document.getElementById('pv-confirm').classList.add('hidden')">Go back</button></div></div>`;
+  c.classList.remove('hidden');
+  $('#pvc-yes').focus();
 }
 async function sendQuote(id) {
-  const to = $('#sq-to').value.trim();
+  if (!_pv || _pv.id !== id) return;
   $('#m-err').textContent = '';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) { $('#m-err').textContent = 'Enter a valid email address for the customer'; $('#sq-to').focus(); return; }
-  const btn = $('#sq-go'); btn.disabled = true;
+  const btn = $('#pvc-yes'); btn.disabled = true;
   // The no-setup fallback opens Gmail in a new tab. Browsers only allow that directly
   // inside the click, so the tab is reserved now and pointed at Gmail once the server answers.
-  const tab = window._sqCompose ? window.open('about:blank', '_blank') : null;
+  const tab = _pv.delivery === 'compose' ? window.open('about:blank', '_blank') : null;
   try {
-    const r = await api(`/quotations/${id}/send`, { method: 'POST', body: { base_url: location.origin, to, via: 'gmail' } });
+    const r = await api(`/quotations/${id}/send`, { method: 'POST', body: { base_url: location.origin, to: _pv.to, via: 'gmail', preview_token: _pv.token } });
     if (r.delivery === 'compose') {
       if (tab) tab.location = r.gmail_compose_url;
-      toast(tab ? `Gmail opened with the quotation for ${r.to} — press Send there. Logged as sent.` : 'Your browser blocked the Gmail tab — allow pop-ups for this site, then press Resend via Gmail.', tab ? 'success' : 'warning');
-    } else { if (tab) tab.close(); toast(`Quotation emailed to ${r.to}`, 'success'); }
+      toast(tab ? `Gmail opened with the quotation for ${r.to}. Press Send there.` : 'Your browser blocked the Gmail tab. Allow pop-ups for this site, then preview and send again.', tab ? 'success' : 'warning');
+    } else { if (tab) tab.close(); toast(`Quotation sent to ${r.to}`, 'success'); }
+    _pv = null;
     quoteDetail(id);
     if (currentPage === 'quotations') quotations();
-  } catch (e) { if (tab) tab.close(); $('#m-err').textContent = e.message; btn.disabled = false; }
+  } catch (e) {
+    if (tab) tab.close();
+    $('#pv-confirm').classList.add('hidden');
+    $('#m-err').textContent = e.message;
+    if (e.data && e.data.code === 'PREVIEW_STALE') loadPreview(id);
+  }
 }
 async function sendQuoteWa(id) {
   try {
     const r = await api(`/quotations/${id}/send`, { method: 'POST', body: { base_url: location.origin, via: 'whatsapp' } });
     window.open(r.whatsapp_url, '_blank');
-    toast('WhatsApp opened with the quote summary and link — logged as sent', 'success');
+    toast('WhatsApp opened with the quotation summary and link. Logged as sent.', 'success');
     quoteDetail(id);
     if (currentPage === 'quotations') quotations();
   } catch (e) { $('#m-err').textContent = e.message; }
@@ -386,7 +584,7 @@ async function convertQuote(id) {
     const r = await api(`/quotations/${id}/convert`, { method: 'POST' });
     openModal(`<h3>${icon('checkCircle', 18)} Customer created</h3>
       <div class="kv"><span>Sites</span><div>${r.sites}</div><span>Service plans</span><div>${r.plans}</div><span>Jobs generated</span><div>${r.jobs_generated} (next 14 days)</div>
-      <span>Portal code</span><div><b style="font-size:22px;letter-spacing:4px">${r.portal_code}</b><br><span class="muted small">Shown once. Customers can also sign in with an OTP to their phone or email.</span></div></div>
+      <span>4-digit app code</span><div><b style="font-size:22px;letter-spacing:4px">${r.portal_code}</b><br><span class="muted small">Shown once. The customer signs in with their mobile number and this code, or with a one-time code sent to their email.</span></div></div>
       <div class="banner ${r.email.sent ? 'ok' : ''}" style="margin-top:14px">${icon('mail', 16)}<div>${r.email.sent ? `App access emailed to <b>${esc(r.email.to)}</b>.`
         : r.email.to ? `App access was <b>not emailed automatically</b>${r.email.error ? ' (' + esc(r.email.error) + ')' : ' (Gmail not connected)'} — use the button below.` : 'This customer has no email — share the code by phone or WhatsApp.'}
         <br>A welcome message is waiting in their app. Invoices will be delivered there with the PDF.</div></div>
@@ -708,7 +906,7 @@ async function settingsV3() {
         ${field('Shift cutoff (unfinished jobs become Overdue)', `<input id="st-cut" type="time" value="${s.shift_cutoff}">`)}
         ${field('Default time window', `<input id="st-win" value="${esc(s.default_time_window)}" placeholder="07:00-12:00">`)}
         ${field('Invoice due (days)', `<input id="st-due" type="number" value="${esc(s.invoice_due_days)}">`)}
-        ${field('Company WhatsApp number', `<input id="st-wa" value="${esc(s.company_whatsapp)}">`)}
+        ${field('Company WhatsApp number', GLPhone.html('st-wa', s.company_whatsapp))}
         ${field('Reply-to email on quotations', `<input id="st-mail" type="email" value="${esc(s.company_email || '')}" placeholder="sales@yourcompany.ae">`)}
         <h3 style="margin-top:16px">${icon('mail', 15)} Gmail (quotations)</h3>
         ${mailBanner(s.mail)}
@@ -721,8 +919,10 @@ async function settingsV3() {
     <button class="btn primary" onclick="saveSettingsV3()">Save settings</button>`;
 }
 async function saveSettingsV3() {
+  const stWa = GLPhone.read('st-wa');
+  if (!stWa.ok) return toast('Company WhatsApp number: ' + stWa.error, 'critical');
   try { await api('/v3/settings', { method: 'PUT', body: { shift_cutoff: $('#st-cut').value, default_time_window: $('#st-win').value, invoice_due_days: $('#st-due').value,
-    company_whatsapp: $('#st-wa').value, company_email: $('#st-mail').value.trim(), uae_holidays: $('#st-hol').value.split('\n').map(x => x.trim()).filter(Boolean) } });
+    company_whatsapp: stWa.e164 || undefined, company_email: $('#st-mail').value.trim(), uae_holidays: $('#st-hol').value.split('\n').map(x => x.trim()).filter(Boolean) } });
   } catch (e) { return toast(e.message, 'critical'); }
   toast('Settings saved', 'success');
 }

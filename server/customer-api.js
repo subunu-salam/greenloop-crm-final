@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { q, getSetting } = require('./db');
 const security = require('./security');
+const contacts = require('./contacts');
 
 require('./security').ensureSecret();
 const SECRET = process.env.JWT_SECRET;
@@ -61,16 +62,17 @@ function mountCustomerRoutes(r, io) {
     const code = String((req.body || {}).code || '');
     const who = String((req.body || {}).phone || '').trim();
     if (!who) return res.status(400).json({ error: 'Enter the mobile number on your account' });
-    if (!/^\d{4,6}$/.test(code)) return res.status(400).json({ error: 'Store code must be 4 to 6 digits' });
-    const key = security.phoneKey(who), email = who.includes('@') ? who.toLowerCase() : null;
-    if (!email && key.length < 7) return res.status(400).json({ error: 'Enter a valid mobile number' });
+    // 4 digits; codes issued before v3.3 had 6 and still sign in
+    if (!/^\d{4,6}$/.test(code)) return res.status(400).json({ error: 'Enter your 4-digit code' });
+    const email = who.includes('@') ? who.toLowerCase() : null;
+    if (!email) { const ph = contacts.parsePhone(who); if (!ph.ok) return res.status(400).json({ error: ph.error }); }
     // sites whose phone/email matches → their account (codes live on the account row)
     const sites = q.all(`SELECT id, COALESCE(account_id, id) acct, contact_phone, email FROM customers WHERE is_active=1`)
-      .filter((s) => email ? String(s.email || '').toLowerCase() === email : security.phoneKey(s.contact_phone) === key);
+      .filter((s) => email ? contacts.sameEmail(s.email, email) : contacts.samePhone(s.contact_phone, who));
     const accts = [...new Set(sites.map((s) => s.acct))].slice(0, 5);
     const c = accts.map((id) => q.get(`SELECT * FROM customers WHERE id=? AND is_active=1 AND portal_code_hash IS NOT NULL`, id))
       .find((row) => row && bcrypt.compareSync(code, row.portal_code_hash));
-    if (!c) return res.status(401).json({ error: 'Mobile number or store code is incorrect' });
+    if (!c) return res.status(401).json({ error: 'Mobile number or code is incorrect' });
     res.json({
       token: signCustomer(c),
       customer: {

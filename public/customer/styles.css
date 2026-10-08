@@ -116,3 +116,11 @@ h2.month small{color:var(--muted);font-weight:600;margin-left:6px}
 .skel{height:90px;border-radius:18px;background:linear-gradient(90deg,var(--card),var(--card2),var(--card));background-size:200% 100%;animation:sk 1.2s infinite}
 @keyframes sk{to{background-position:-200% 0}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
+
+/* v3.3: phone field (country code + number) and sign-in tweaks */
+.gl-phone{display:grid;grid-template-columns:minmax(136px,46%) 1fr;gap:8px}
+.gl-phone select,.gl-phone input{min-width:0;width:100%;background:rgba(0,0,0,.25);border:1px solid var(--line);color:var(--text);border-radius:12px;padding:12px 12px;font:inherit;font-size:16px}
+.gl-phone select option{background:#0b2a25}
+.gl-phone select:focus,.gl-phone input:focus{outline:none;border-color:var(--teal);box-shadow:0 0 0 3px rgba(45,212,191,.2)}
+.gl-phone-num{letter-spacing:.02em;font-weight:700}
+.linkbtn{background:none;border:0;color:var(--teal);font:inherit;font-size:13.5px;font-weight:700;padding:4px 0;text-align:left;text-decoration:underline;text-underline-offset:3px}

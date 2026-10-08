@@ -37,6 +37,7 @@ const v3 = require(SRV + 'v3');
 v3.mountV3Routes(router, io);
 require(SRV + 'push-api').mountPushRoutes(router, io);
 require(SRV + 'fleet-maintenance').mountFleetMaintenanceRoutes(router, io);
+require(SRV + 'driver-shift').mountDriverShiftRoutes(router, io);
 const tok = p => 'T.' + Buffer.from(JSON.stringify(p)).toString('base64');
 function match(route, m, url) {
   if (route.m !== m) return null;
