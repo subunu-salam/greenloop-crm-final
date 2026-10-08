@@ -15,6 +15,7 @@ const { mountOpsFeatureRoutes } = require('./ops-features');
 const { mountAiRoutes } = require('./ai-api');
 const { mountPushRoutes } = require('./push-api');
 const { mountFleetMaintenanceRoutes } = require('./fleet-maintenance');
+const { mountDriverShiftRoutes } = require('./driver-shift');
 const v3 = require('./v3');
 const scheduler = require('./services/scheduler');
 const sla = require('./services/sla');
@@ -52,6 +53,7 @@ mountOpsFeatureRoutes(apiRouter, io);
 mountAiRoutes(apiRouter);
 mountPushRoutes(apiRouter, io);
 mountFleetMaintenanceRoutes(apiRouter, io);
+mountDriverShiftRoutes(apiRouter, io);
 v3.mountV3Routes(apiRouter, io);
 // Brute-force protection on every sign-in route (failed attempts → lockout).
 const L = (name, opts) => security.loginThrottle(name, opts);
@@ -70,6 +72,8 @@ app.use('/uploads', security.uploadsGate, express.static(process.env.UPLOAD_DIR 
 app.use('/crm', express.static(path.join(__dirname, '..', 'public', 'crm')));
 app.use('/driver', express.static(path.join(__dirname, '..', 'public', 'driver')));
 app.use('/customer', express.static(path.join(__dirname, '..', 'public', 'customer')));
+// shared browser helpers (phone field) used by the CRM and the customer app
+app.use('/shared', express.static(path.join(__dirname, '..', 'public', 'shared')));
 
 const crmV2 = path.join(__dirname, '..', 'public', 'crm-v2');
 app.use('/crm-v2', express.static(crmV2));

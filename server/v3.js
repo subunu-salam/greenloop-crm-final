@@ -20,6 +20,7 @@ const { q, getSetting, setSetting } = require('./db');
 let push = null;
 try { push = require('./push'); } catch { push = null; }
 const mailer = require('./mailer');
+const contacts = require('./contacts');
 
 require('./security').ensureSecret();
 const SECRET = process.env.JWT_SECRET;
@@ -292,7 +293,9 @@ function occursOn(rule, dateStr) {
       if (n === -1) return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), dom + 7)).getUTCMonth() !== d.getUTCMonth();
       return Math.ceil(dom / 7) === n;
     }
-    return dom === Math.min(28, Math.max(1, Number(rule.date) || 1));
+    // several visits a month: {dates:[1,15]}; a single visit keeps the older {date:1} shape
+    const dates = Array.isArray(rule.dates) && rule.dates.length ? rule.dates : [rule.date];
+    return dates.some(x => dom === Math.min(28, Math.max(1, Number(x) || 1)));
   }
   return false;
 }
@@ -302,6 +305,7 @@ function describeRule(r) {
   if (r.type === 'daily') return r.weekdays_only ? 'Daily (Mon–Fri)' : 'Daily';
   if (r.type === 'weekly') return 'Weekly · ' + (r.days || []).map(x => D[x]).join(', ');
   if (r.type === 'monthly' && r.mode === 'nth') return `Monthly · ${r.n == -1 ? 'last' : ['', '1st', '2nd', '3rd', '4th', '5th'][r.n]} ${D[r.weekday]}`;
+  if (r.type === 'monthly' && Array.isArray(r.dates) && r.dates.length > 1) return `Monthly · days ${r.dates.join(', ')}`;
   if (r.type === 'monthly') return `Monthly · day ${r.date}`;
   return '—';
 }
@@ -309,6 +313,10 @@ function validateRule(r) {
   if (!r || !['daily', 'weekly', 'monthly'].includes(r.type)) return 'recurrence.type must be daily, weekly or monthly';
   if (r.type === 'weekly' && (!Array.isArray(r.days) || !r.days.length || r.days.some(x => x < 0 || x > 6))) return 'Weekly plans need at least one day (0–6)';
   if (r.type === 'monthly' && r.mode === 'nth' && (![1, 2, 3, 4, 5, -1].includes(Number(r.n)) || !(r.weekday >= 0 && r.weekday <= 6))) return 'Monthly nth-weekday needs n (1–5 or -1) and weekday (0–6)';
+  if (r.type === 'monthly' && r.mode !== 'nth' && Array.isArray(r.dates) && r.dates.length) {
+    if (r.dates.length > 28 || r.dates.some(x => !(Number(x) >= 1 && Number(x) <= 28))) return 'Monthly dates must be 1–28';
+    return null;
+  }
   if (r.type === 'monthly' && r.mode !== 'nth' && !(Number(r.date) >= 1 && Number(r.date) <= 28)) return 'Monthly date must be 1–28';
   return null;
 }
@@ -529,14 +537,59 @@ function onNotPickedUp(pickupId) {
 }
 
 // ── sales helpers ────────────────────────────────────────────
+/* Frequency-based pricing (v3.3).
+   A quotation line is priced from how often the service happens, not from a typed
+   visit count:   visits a month × price per visit.
+     daily   n visits a day   → n × 30
+     weekly  n visits a week  → n × 52 ÷ 12, rounded (3 a week = 13, 7 a week = 30)
+     monthly n visits a month → n
+   The month is an average month, so a quote does not change with the calendar.
+   Invoices are still built from the visits actually completed. */
+const FREQ = { daily: { max: 3, per: 'day' }, weekly: { max: 7, per: 'week' }, monthly: { max: 28, per: 'month' } };
+function visitsPerMonth(unit, count) {
+  const n = Number(count);
+  if (unit === 'daily') return n * 30;
+  if (unit === 'weekly') return Math.round(n * 52 / 12);
+  return n;
+}
+function frequencyLabel(unit, count) {
+  const n = Number(count), per = FREQ[unit].per;
+  if (unit === 'daily' && n === 1) return 'Every day';
+  return n === 1 ? `Once a ${per}` : n === 2 ? `Twice a ${per}` : `${n} times a ${per}`;
+}
+const frequencyError = (unit, count) => !FREQ[unit] ? 'frequency must be daily, weekly or monthly'
+  : !(Number.isInteger(Number(count)) && Number(count) >= 1 && Number(count) <= FREQ[unit].max) ? `choose 1 to ${FREQ[unit].max} visits a ${FREQ[unit].per}` : null;
+// "weekly:3" (how a lead stores the frequency it asked for) → { unit, count } | null
+function parseFrequency(s) {
+  const m = /^(daily|weekly|monthly):(\d{1,2})$/.exec(String(s || ''));
+  return m && !frequencyError(m[1], Number(m[2])) ? { unit: m[1], count: Number(m[2]) } : null;
+}
+// The visit days a frequency implies when the quotation's own schedule does not already match it.
+const SPREAD_DAYS = { 1: [1], 2: [0, 3], 3: [0, 2, 4], 4: [0, 1, 3, 4], 5: [0, 1, 2, 3, 4], 6: [6, 0, 1, 2, 3, 4], 7: [0, 1, 2, 3, 4, 5, 6] };
+function recurrenceForLine(line, planRule) {
+  if (!line || !line.freq_unit || frequencyError(line.freq_unit, line.freq_count)) return planRule;
+  const n = Number(line.freq_count), r = planRule || {};
+  if (line.freq_unit === 'daily') return r.type === 'daily' && !r.weekdays_only ? r : { type: 'daily', weekdays_only: false };
+  if (line.freq_unit === 'weekly') return r.type === 'weekly' && Array.isArray(r.days) && new Set(r.days.map(Number)).size === n ? r : { type: 'weekly', days: SPREAD_DAYS[n] };
+  if (n === 1) return r.type === 'monthly' && !(Array.isArray(r.dates) && r.dates.length > 1) ? r : { type: 'monthly', mode: 'date', date: 1 };
+  return { type: 'monthly', mode: 'date', dates: Array.from({ length: n }, (_, i) => Math.min(28, 1 + Math.round(i * 28 / n))) };
+}
+
 // Rejects impossible quotation lines instead of silently zeroing them.
 function quoteItemsError(items) {
   if (!Array.isArray(items) || !items.length) return 'Add at least one priced line item';
   if (items.length > 100) return 'Too many line items (max 100)';
   for (const [i, it] of items.entries()) {
-    const qty = Number(it.qty), unit = Number(it.unit_price);
-    if (!isFinite(qty) || qty <= 0) return `Line ${i + 1}: quantity must be more than 0`;
-    if (qty > 100000) return `Line ${i + 1}: quantity is too large`;
+    const unit = Number(it.unit_price);
+    if (it.freq_unit !== undefined && it.freq_unit !== null && it.freq_unit !== '') {
+      const fErr = frequencyError(it.freq_unit, it.freq_count);
+      if (fErr) return `Line ${i + 1}: ${fErr}`;
+    } else {
+      // older API callers that still send a plain visit count
+      const qty = Number(it.qty);
+      if (!isFinite(qty) || qty <= 0) return `Line ${i + 1}: quantity must be more than 0`;
+      if (qty > 100000) return `Line ${i + 1}: quantity is too large`;
+    }
     if (!isFinite(unit) || unit < 0) return `Line ${i + 1}: price cannot be negative`;
     if (unit > 1000000) return `Line ${i + 1}: unit price is too large (max AED 1,000,000)`;
   }
@@ -544,9 +597,14 @@ function quoteItemsError(items) {
 }
 function calcQuote(items) {
   const clean = (items || []).map(it => {
-    const qty = Math.max(0, Number(it.qty) || 0), unit = Math.max(0, Number(it.unit_price) || 0);
-    return { service_code: it.service_code || 'WASTE', description: String(it.description || ''), site: String(it.site || ''),
-      frequency: String(it.frequency || ''), qty, unit_price: money(unit), line_total: money(qty * unit) };
+    const unit = Math.max(0, Number(it.unit_price) || 0);
+    const byFreq = !!it.freq_unit && !frequencyError(it.freq_unit, it.freq_count);
+    // the visit count is always worked out here, never trusted from the browser
+    const qty = byFreq ? visitsPerMonth(it.freq_unit, it.freq_count) : Math.max(0, Number(it.qty) || 0);
+    const line = { service_code: it.service_code || 'WASTE', description: String(it.description || ''), site: String(it.site || ''),
+      frequency: byFreq ? frequencyLabel(it.freq_unit, it.freq_count) : String(it.frequency || ''), qty, unit_price: money(unit), line_total: money(qty * unit) };
+    if (byFreq) { line.freq_unit = it.freq_unit; line.freq_count = Number(it.freq_count); }
+    return line;
   });
   const subtotal = money(clean.reduce((a, i) => a + i.line_total, 0));
   const vat = money(subtotal * VAT_RATE);
@@ -565,11 +623,11 @@ function quoteView(qt) {
   return { ...qt, items: J(qt.items, []), plan: J(qt.plan, {}), status: expired ? 'expired' : qt.status,
     lead: lead ? { ...lead, sites: J(lead.sites, []) } : null };
 }
-// Portal codes are 6 digits and are always used together with the account's
-// mobile number, so they no longer need to be globally unique (that check
-// cost one bcrypt comparison per customer).
+// App codes are 4 digits (v3.3), the same length as the driver PIN. A code is always used
+// together with the account's mobile number, and wrong attempts lock out after five tries,
+// so codes do not need to be unique. Older 6-digit codes keep working until they are reset.
 async function uniquePortalCode() {
-  return String(crypto.randomInt(100000, 1000000));
+  return String(crypto.randomInt(1000, 10000));
 }
 
 // ── printable documents (branded HTML → browser "Save as PDF") ──
@@ -597,41 +655,122 @@ function brandHeader(docTitle, number, lines) {
   return `<div class="hd"><div class="brand">${LOGO}<div>GreenLoop<small>${h(getSetting('company_name', 'Majari / GreenLoop'))} · Waste management &amp; pest control · Dubai, UAE</small></div></div>
   <div class="meta"><b>${h(docTitle)}</b>${h(number)}<br>${lines.join('<br>')}</div></div>`;
 }
-// Email body for a quotation: summary + one button to view / download the PDF and accept.
+/* ── Quotation document + email (v3.3) ─────────────────────────
+   One restrained layout for both: a letterhead, three facts, the priced lines,
+   the monthly total. Hairlines and alignment do the work; no boxes or badges. */
+const QUOTE_CSS = `
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:#e9eeec;color:#13231f;font:14px/1.5 'Segoe UI',-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;font-variant-numeric:tabular-nums}
+.bar{max-width:800px;margin:20px auto 0;padding:0 16px;display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+.bar button{font:inherit;font-weight:600;cursor:pointer;border-radius:8px;padding:10px 18px;border:1px solid #0f766e;background:#fff;color:#0f766e}
+.bar button.go{background:#0f766e;color:#fff}.bar form{margin:0}
+.sheet{max-width:800px;margin:16px auto 40px;background:#fff;padding:56px 56px 40px;box-shadow:0 1px 2px rgba(19,35,31,.08),0 12px 32px -16px rgba(19,35,31,.25)}
+.lh{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;padding-bottom:20px;border-bottom:2px solid #13231f}
+.mark{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:700;letter-spacing:-.01em}
+.mark small{display:block;font-size:12px;font-weight:400;color:#55645f;letter-spacing:0}
+.title{text-align:right}.title b{display:block;font-size:30px;font-weight:300;letter-spacing:-.02em;line-height:1.1}
+.title span{font-size:13px;color:#55645f}
+.facts{display:grid;grid-template-columns:1.2fr 1fr 1.2fr;margin:26px 0 30px}
+.facts>div{padding:0 20px;border-left:1px solid #dfe6e3}.facts>div:first-child{padding-left:0;border-left:0}
+.facts dt{font-size:12px;color:#55645f;margin-bottom:4px}.facts dd{margin:0}.facts dd b{font-weight:600}
+table{width:100%;border-collapse:collapse}
+thead th{font-size:12px;font-weight:600;color:#55645f;text-align:left;padding:0 10px 8px 0;border-bottom:1.5px solid #13231f;vertical-align:bottom}
+tbody td{padding:13px 10px 13px 0;border-bottom:1px solid #dfe6e3;vertical-align:top}
+th.n,td.n{text-align:right;padding-right:0;padding-left:10px;white-space:nowrap}
+td .sub{display:block;font-size:12.5px;color:#55645f}
+.sum{margin:18px 0 0 auto;width:300px}.sum td{padding:5px 0;border:0}.sum td.n{padding-left:10px}
+.sum .total td{padding-top:12px;border-top:2px solid #13231f;font-weight:700;font-size:17px}
+.sum .total td.n{font-size:22px;letter-spacing:-.01em}
+.note{margin-top:30px}.note h4{margin:0 0 4px;font-size:12px;font-weight:600;color:#55645f}.note p{margin:0;white-space:pre-wrap}
+.terms{margin-top:34px;padding-top:14px;border-top:1px solid #dfe6e3;font-size:12px;color:#55645f;line-height:1.6}
+.state{margin:0 0 22px;padding:10px 14px;border-left:3px solid #0f766e;background:#f3f8f6;font-size:13px}
+.state.off{border-left-color:#b45309;background:#fdf6ec}
+@media (max-width:640px){.sheet{padding:28px 20px;margin:12px 0 24px}.lh{flex-direction:column;align-items:flex-start}.title{text-align:left}
+  .facts{grid-template-columns:1fr;gap:14px}.facts>div{padding:0;border:0}
+  thead{display:none}tbody tr{display:block;padding:12px 0;border-bottom:1px solid #dfe6e3}tbody td{display:block;border:0;padding:0}
+  tbody td.n{text-align:left;padding:0;color:#55645f;font-size:13px;display:inline}tbody td.n::before{content:attr(data-l) ' '}tbody td.n+td.n::before{content:' · ' attr(data-l) ' '}
+  tbody td.amt{display:block;color:#13231f;font-weight:600;font-size:15px;margin-top:4px}tbody td.amt::before{content:attr(data-l) ' ' !important}
+  .sum{width:100%}}
+@media print{body{background:#fff}.bar{display:none}.sheet{box-shadow:none;margin:0;max-width:none;padding:24px 8px}}
+body.embed{background:#fff}body.embed .bar{display:none}body.embed .sheet{box-shadow:none;margin:0 auto;padding:36px 36px 28px}`;
+const QUOTE_MARK = `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="#0f766e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg>`;
+const aed = n => Number(n || 0).toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// every line priced by frequency → the total is a monthly figure
+const quoteIsMonthly = qv => qv.items.length > 0 && qv.items.every(i => i.freq_unit);
+function quoteLineText(i) {
+  return i.freq_unit ? `${i.frequency} (${i.qty} visit${i.qty === 1 ? '' : 's'} a month)` : `${i.qty} visit${i.qty === 1 ? '' : 's'}${i.frequency ? ', ' + i.frequency : ''}`;
+}
+
+// Email body: what the customer reads in their inbox. Tables + inline styles only (mail clients).
 function quoteEmailHtml(qv, link) {
   const lead = qv.lead || {};
-  const rows = qv.items.map(i => `<tr><td style="padding:8px;border-bottom:1px solid #e5e7eb">${h(i.description || i.service_code)}${i.site ? `<br><span style="color:#6b7280;font-size:12px">${h(i.site)}</span>` : ''}</td>
-    <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">${i.qty} × ${Number(i.unit_price).toFixed(2)}</td>
-    <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">${Number(i.line_total).toFixed(2)}</td></tr>`).join('');
-  return `<div style="font:14px/1.55 'Segoe UI',Arial,sans-serif;color:#10241f;max-width:600px;margin:0 auto">
-  <div style="border-bottom:3px solid #14b8a6;padding-bottom:12px;margin-bottom:16px"><span style="font-size:22px;font-weight:800;color:#0f766e">GreenLoop</span>
-    <span style="float:right;text-align:right;font-size:12px;color:#374151"><b style="font-size:15px;color:#10241f">QUOTATION</b><br>${h(qv.number)} · v${qv.version}</span></div>
-  <p>Hello ${h(lead.contact || '')},</p>
-  <p>Thank you for your interest in GreenLoop. Your quotation is below — you can view it, download the PDF and accept it online.</p>
-  <table style="width:100%;border-collapse:collapse;margin:14px 0"><tr style="background:#f0fdfa;color:#0f766e;font-size:11px;text-transform:uppercase"><th style="padding:8px;text-align:left">Service</th><th style="padding:8px;text-align:right">Visits × unit (AED)</th><th style="padding:8px;text-align:right">Total (AED)</th></tr>${rows}
-    <tr><td colspan="2" style="padding:6px 8px;text-align:right">Subtotal</td><td style="padding:6px 8px;text-align:right">${qv.subtotal.toFixed(2)}</td></tr>
-    <tr><td colspan="2" style="padding:6px 8px;text-align:right">VAT 5%</td><td style="padding:6px 8px;text-align:right">${qv.vat.toFixed(2)}</td></tr>
-    <tr><td colspan="2" style="padding:8px;text-align:right;font-weight:800;color:#0f766e;border-top:2px solid #14b8a6">Total</td><td style="padding:8px;text-align:right;font-weight:800;color:#0f766e;border-top:2px solid #14b8a6">AED ${qv.total.toFixed(2)}</td></tr></table>
-  <p><b>Plan:</b> ${h(describeRule(qv.plan.recurrence))} · window ${h(qv.plan.time_window || '—')}<br><b>Valid until:</b> ${h(dmy(qv.valid_until))}</p>
-  <p style="margin:22px 0"><a href="${h(link)}" style="background:#0f766e;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;display:inline-block">View quotation, download PDF &amp; accept</a></p>
-  <p style="font-size:12px;color:#6b7280">Once you accept, we register your account and you receive access to the GreenLoop customer app, where your invoices (with PDF), visit photo-proof and reminders are delivered.</p>
-  <p style="font-size:12px;color:#6b7280">If the button does not work, open this link: ${h(link)}</p></div>`;
+  const monthly = quoteIsMonthly(qv);
+  const cell = 'padding:12px 0;border-bottom:1px solid #dfe6e3;vertical-align:top';
+  const rows = qv.items.map(i => `<tr><td style="${cell}">${h(i.description || i.service_code)}${i.site ? `<br><span style="color:#55645f;font-size:13px">${h(i.site)}</span>` : ''}
+      <br><span style="color:#55645f;font-size:13px">${h(quoteLineText(i))} at AED ${aed(i.unit_price)} a visit</span></td>
+    <td style="${cell};text-align:right;white-space:nowrap;padding-left:16px">AED ${aed(i.line_total)}</td></tr>`).join('');
+  const sum = (label, value, strong) => `<tr><td style="padding:${strong ? '12px 0 0' : '5px 0'};${strong ? 'border-top:2px solid #13231f;font-weight:700;font-size:16px' : 'color:#55645f'}">${label}</td>
+    <td style="padding:${strong ? '12px 0 0 16px' : '5px 0 5px 16px'};text-align:right;white-space:nowrap;${strong ? 'border-top:2px solid #13231f;font-weight:700;font-size:20px' : ''}">AED ${aed(value)}</td></tr>`;
+  return `<div style="background:#ffffff;color:#13231f;font:15px/1.55 'Segoe UI',-apple-system,'Helvetica Neue',Arial,sans-serif;max-width:560px;margin:0 auto;padding:8px 4px">
+  <table role="presentation" style="width:100%;border-collapse:collapse"><tr>
+    <td style="padding:0 0 14px;border-bottom:2px solid #13231f;font-size:19px;font-weight:700">GreenLoop</td>
+    <td style="padding:0 0 14px;border-bottom:2px solid #13231f;text-align:right;font-size:13px;color:#55645f">Quotation ${h(qv.number)}${qv.version > 1 ? `, version ${qv.version}` : ''}</td></tr></table>
+  <p style="margin:22px 0 10px">Hello ${h(lead.contact || lead.company || '')},</p>
+  <p style="margin:0 0 20px">Here is your quotation for ${h(lead.company || 'your sites')}. It is valid until ${h(dmy(qv.valid_until))}.</p>
+  <table role="presentation" style="width:100%;border-collapse:collapse">${rows}</table>
+  <table role="presentation" style="width:100%;border-collapse:collapse;margin-top:10px">
+    ${sum('Subtotal', qv.subtotal)}${sum('VAT 5%', qv.vat)}${sum(monthly ? 'Total a month' : 'Total', qv.total, true)}</table>
+  <p style="margin:26px 0 8px"><a href="${h(link)}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;font-weight:600;padding:13px 22px;border-radius:8px">Review and accept the quotation</a></p>
+  <p style="margin:0 0 22px;font-size:13px;color:#55645f">The link opens the full quotation, where you can also save it as a PDF.</p>
+  <p style="margin:0;font-size:13px;color:#55645f;line-height:1.6">${monthly ? 'Monthly amounts use an average month. You are invoiced only for visits we complete, each one confirmed with a GPS-stamped photo. ' : ''}After you accept, we set up your account and send you access to the GreenLoop customer app, where your invoices and visit photos appear.</p>
+  <p style="margin:18px 0 0;font-size:12px;color:#8a9692;word-break:break-all">If the button does not open, copy this address into your browser: ${h(link)}</p></div>`;
 }
+function quoteEmailText(qv, link) {
+  const lead = qv.lead || {};
+  const monthly = quoteIsMonthly(qv);
+  return `Hello ${lead.contact || lead.company || ''},\n\nHere is your GreenLoop quotation ${qv.number}${qv.version > 1 ? ` (version ${qv.version})` : ''}, valid until ${dmy(qv.valid_until)}.\n\n` +
+    qv.items.map(i => `- ${i.description || i.service_code}${i.site ? ' (' + i.site + ')' : ''}: ${quoteLineText(i)} at AED ${aed(i.unit_price)} a visit = AED ${aed(i.line_total)}`).join('\n') +
+    `\n\nSubtotal: AED ${aed(qv.subtotal)}\nVAT 5%: AED ${aed(qv.vat)}\n${monthly ? 'Total a month' : 'Total'}: AED ${aed(qv.total)}\n\nReview and accept the quotation, or save it as a PDF:\n${link}\n\n` +
+    `${monthly ? 'Monthly amounts use an average month. You are invoiced only for visits we complete.\n' : ''}GreenLoop`;
+}
+// The email exactly as it will go out. Preview and send both build it here, so they cannot differ.
+function quoteMail(qv, to, base) {
+  const link = `${base}/q/${qv.share_token}`;
+  return { to, link, subject: `Your GreenLoop quotation ${qv.number} — AED ${aed(qv.total)}${quoteIsMonthly(qv) ? ' a month' : ''}`,
+    text: quoteEmailText(qv, link), html: quoteEmailHtml(qv, link), replyTo: getSetting('company_email', '') };
+}
+// Fingerprint of a previewed email. Sending requires it, so nothing goes out unseen or changed.
+function previewToken(qv, mail) {
+  return crypto.createHmac('sha256', SECRET).update([qv.id, qv.version, mail.to, mail.subject, mail.html].join('\n')).digest('hex').slice(0, 32);
+}
+
 function quoteHtml(qv, opts = {}) {
   const lead = qv.lead || {};
-  const rows = qv.items.map(i => `<tr><td><b>${h(i.description || i.service_code)}</b><br><span style="color:#6b7280">${h(i.site)}</span></td><td>${h(i.frequency)}</td><td class="r">${i.qty}</td><td class="r">${i.unit_price.toFixed(2)}</td><td class="r">${i.line_total.toFixed(2)}</td></tr>`).join('');
-  const accept = opts.acceptUrl && ['sent', 'draft'].includes(qv.status)
-    ? `<form method="post" action="${opts.acceptUrl}" style="display:inline"><button>Accept quotation</button></form>` : '';
-  return docShell(`Quotation ${qv.number}`, `
-    ${brandHeader('QUOTATION', `${qv.number} · v${qv.version}`, [`Date: ${dmy(qv.created_at)}`, `Valid until: <b>${h(dmy(qv.valid_until))}</b>`, `<span class="pill">${h(qv.status)}</span>`])}
-    <div class="two"><div class="box"><h4>Prepared for</h4><b>${h(lead.company || lead.contact)}</b><br>${h(lead.contact)}<br>${h(lead.phone)} ${h(lead.email || '')}</div>
-    <div class="box"><h4>Service plan</h4>${h(describeRule(qv.plan.recurrence))}<br>Window ${h(qv.plan.time_window || '—')} · from ${h(qv.plan.start_date ? dmy(qv.plan.start_date) : 'on acceptance')}<br>Billing: ${h(qv.plan.billing === 'per_visit' ? 'per visit' : 'monthly')}</div></div>
-    <table><tr><th>Service / site</th><th>Frequency</th><th class="r">Visits</th><th class="r">Unit (AED)</th><th class="r">Total (AED)</th></tr>${rows}</table>
-    <table class="tot" style="width:320px;margin-left:auto"><tr><td>Subtotal</td><td class="r">AED ${qv.subtotal.toFixed(2)}</td></tr>
-    <tr><td>VAT 5%</td><td class="r">AED ${qv.vat.toFixed(2)}</td></tr><tr class="g"><td>Total</td><td class="r">AED ${qv.total.toFixed(2)}</td></tr></table>
-    ${qv.notes ? `<div class="box"><h4>Notes</h4>${h(qv.notes)}</div>` : ''}
-    <div class="foot">Prices in AED, VAT 5% included in total. Every completed visit is verified with a GPS-stamped live photo, visible in your customer portal. Quotation valid until ${h(dmy(qv.valid_until))} (DD/MM/YYYY).</div>`,
-  accept, !!opts.print);
+  const monthly = quoteIsMonthly(qv);
+  const rows = qv.items.map(i => `<tr><td>${h(i.description || i.service_code)}${i.site ? `<span class="sub">${h(i.site)}</span>` : ''}</td>
+    <td>${h(i.frequency || '—')}</td><td class="n" data-l="Visits${monthly ? ' a month' : ''}">${i.qty}</td>
+    <td class="n" data-l="Per visit AED">${aed(i.unit_price)}</td><td class="n amt" data-l="AED">${aed(i.line_total)}</td></tr>`).join('');
+  const canAccept = opts.acceptUrl && ['sent', 'draft'].includes(qv.status);
+  const state = qv.status === 'expired' ? `<p class="state off">This quotation expired on ${h(dmy(qv.valid_until))}. Ask us for an updated one.</p>`
+    : ['accepted', 'converted'].includes(qv.status) ? `<p class="state">Accepted${qv.accepted_at ? ' on ' + h(dmy(qv.accepted_at)) : ''}. Thank you.</p>`
+    : qv.status === 'superseded' ? `<p class="state off">A newer version of this quotation replaces this one.</p>` : '';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quotation ${h(qv.number)}</title><style>${QUOTE_CSS}</style></head>
+<body class="${opts.embed ? 'embed' : ''}">${opts.embed ? '' : `<div class="bar"><button onclick="print()">Save as PDF</button>${canAccept ? `<form method="post" action="${opts.acceptUrl}"><button class="go">Accept quotation</button></form>` : ''}</div>`}
+<div class="sheet">
+  <div class="lh"><div class="mark">${QUOTE_MARK}<div>GreenLoop<small>${h(getSetting('company_name', 'Majari / GreenLoop'))}, waste management and pest control, Dubai</small></div></div>
+    <div class="title"><b>Quotation</b><span>${h(qv.number)}${qv.version > 1 ? `, version ${qv.version}` : ''}</span></div></div>
+  <dl class="facts">
+    <div><dt>Prepared for</dt><dd><b>${h(lead.company || lead.contact || '')}</b><br>${lead.company ? h(lead.contact || '') + '<br>' : ''}${h(lead.phone ? contacts.formatPhone(lead.phone) : '')}${lead.phone && lead.email ? '<br>' : ''}${h(lead.email || '')}</dd></div>
+    <div><dt>Issued</dt><dd>${h(dmy(qv.created_at))}</dd><dt style="margin-top:10px">Valid until</dt><dd><b>${h(dmy(qv.valid_until))}</b></dd></div>
+    <div><dt>Service schedule</dt><dd>${h(describeRule(qv.plan.recurrence).replace(' · ', ' on '))}<br>Between ${h(String(qv.plan.time_window || '—').replace('-', ' and '))}<br>${qv.plan.start_date ? 'Starts ' + h(dmy(qv.plan.start_date)) : 'Starts when you accept'}</dd></div>
+  </dl>
+  ${state}
+  <table><thead><tr><th>Service</th><th>How often</th><th class="n">Visits${monthly ? '<br>a month' : ''}</th><th class="n">Per visit<br>AED</th><th class="n">${monthly ? 'A month' : 'Amount'}<br>AED</th></tr></thead><tbody>${rows}</tbody></table>
+  <table class="sum"><tr><td>Subtotal</td><td class="n">AED ${aed(qv.subtotal)}</td></tr><tr><td>VAT 5%</td><td class="n">AED ${aed(qv.vat)}</td></tr>
+    <tr class="total"><td>${monthly ? 'Total a month' : 'Total'}</td><td class="n">AED ${aed(qv.total)}</td></tr></table>
+  ${qv.notes ? `<div class="note"><h4>Notes</h4><p>${h(qv.notes)}</p></div>` : ''}
+  <p class="terms">${monthly ? 'Monthly amounts are worked out from an average month (a weekly visit counts as 4.33 visits). ' : ''}You are invoiced ${qv.plan.billing === 'per_visit' ? 'after each visit' : 'once a month'}, only for visits we complete. Every completed visit is confirmed with a GPS-stamped photo you can see in the customer app. Prices are in UAE dirhams. Dates are written day/month/year.</p>
+</div>${opts.print ? '<script>setTimeout(()=>print(),400)</script>' : ''}</body></html>`;
 }
 function invoiceHtml(iv, autoPrint) {
   const pays = q.all(`SELECT * FROM payments WHERE invoice_id=? ORDER BY received_at`, iv.id);
@@ -693,17 +832,37 @@ function mountV3Routes(r, io) {
   function leadError(b) {
     if (String(b.contact || '').length > 120) return 'Contact name is too long (max 120 characters)';
     if (String(b.company || '').length > 160) return 'Company name is too long (max 160 characters)';
-    if (b.phone && !security.isPhone(b.phone)) return 'Phone number looks wrong — use digits, e.g. +971 50 123 4567';
-    if (b.email && !security.isEmail(b.email)) return 'Email address looks wrong';
     if (Array.isArray(b.sites) && b.sites.length > 50) return 'Too many sites on one lead (max 50)';
+    if (b.frequency && String(b.frequency).length > 40) return 'Frequency is too long';
     return null;
+  }
+  // Mobile + email are the lead's unique identifiers: one format, validated, never duplicated.
+  //   → { phone, email } (normalised) or { status, body } to send back
+  function leadContacts(b, lead = null) {
+    const out = { phone: lead ? lead.phone : '', email: lead ? lead.email : '' };
+    if (b.phone !== undefined && String(b.phone || '') !== String(lead ? lead.phone || '' : '\u0000')) {
+      if (!String(b.phone || '').trim()) out.phone = '';
+      else { const p = contacts.parsePhone(b.phone); if (!p.ok) return { status: 400, body: { error: p.error, field: 'phone' } }; out.phone = p.e164; }
+    }
+    if (b.email !== undefined && String(b.email || '') !== String(lead ? lead.email || '' : '\u0000')) {
+      if (!String(b.email || '').trim()) out.email = '';
+      else { const e = contacts.parseEmail(b.email); if (!e.ok) return { status: 400, body: { error: e.error, field: 'email' } }; out.email = e.email; }
+    }
+    if (!out.phone && !out.email) return { status: 400, body: { error: 'A mobile number or an email is required' } };
+    const changed = !lead || out.phone !== (lead.phone || '') || out.email !== (lead.email || '');
+    if (changed) {
+      const dup = contacts.findDuplicate({ phone: out.phone, email: out.email }, { exceptLeadId: lead ? lead.id : null, exceptAccountId: lead ? lead.customer_id : null });
+      if (dup) return { status: 409, body: { error: contacts.duplicateMessage(dup), code: 'DUPLICATE', duplicate: dup } };
+    }
+    return out;
   }
   r.post('/leads', staff, (req, res) => {
     const b = req.body || {};
-    if (!b.contact || !(b.phone || b.email)) return res.status(400).json({ error: 'Contact name and a phone or email are required' });
+    if (!String(b.contact || '').trim()) return res.status(400).json({ error: 'Contact name is required' });
     const lErr = leadError(b); if (lErr) return res.status(400).json({ error: lErr });
+    const ct = leadContacts(b); if (ct.status) return res.status(ct.status).json(ct.body);
     const info = q.run(`INSERT INTO leads(contact,company,phone,email,service_type,sites,frequency,source,stage,owner_id,follow_up_at,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-      b.contact, b.company || '', b.phone || '', b.email || '', b.service_type || 'WASTE', JSON.stringify(b.sites || []), b.frequency || '',
+      String(b.contact).trim(), b.company || '', ct.phone, ct.email, b.service_type || 'WASTE', JSON.stringify(b.sites || []), b.frequency || '',
       b.source || 'other', 'new', b.owner_id || req.user.id, b.follow_up_at || null, b.notes || '');
     audit(req, 'lead', info.lastInsertRowid, 'create', null, b);
     io.to('staff').emit('lead:changed', {});
@@ -716,18 +875,34 @@ function mountV3Routes(r, io) {
     if (!STAGES.includes(b.stage)) return res.status(400).json({ error: 'Invalid stage' });
     const lErr = leadError(req.body || {}); if (lErr) return res.status(400).json({ error: lErr });
     if (b.stage === 'won' && l.stage !== 'won' && !l.customer_id) return res.status(400).json({ error: 'A lead becomes Won by converting an accepted quotation' });
+    const ct = leadContacts(req.body || {}, l); if (ct.status) return res.status(ct.status).json(ct.body);
     q.run(`UPDATE leads SET contact=?,company=?,phone=?,email=?,service_type=?,sites=?,frequency=?,source=?,stage=?,lost_reason=?,owner_id=?,follow_up_at=?,notes=?,updated_at=datetime('now') WHERE id=?`,
-      b.contact, b.company, b.phone, b.email, b.service_type, JSON.stringify(Array.isArray(b.sites) ? b.sites : J(b.sites, [])), b.frequency, b.source,
+      b.contact, b.company, ct.phone, ct.email, b.service_type, JSON.stringify(Array.isArray(b.sites) ? b.sites : J(b.sites, [])), b.frequency, b.source,
       b.stage, b.lost_reason || null, b.owner_id, b.follow_up_at || null, b.notes, l.id);
     audit(req, 'lead', l.id, 'update', l, req.body);
     io.to('staff').emit('lead:changed', {});
     res.json({ ok: true });
+  });
+  // Is this mobile number / email already in the CRM? (used by the forms while typing)
+  r.get('/contacts/check', staff, (req, res) => {
+    const out = { phone: null, email: null, duplicate: null };
+    if (req.query.phone) { const p = contacts.parsePhone(req.query.phone); if (!p.ok) return res.json({ ...out, error: p.error, field: 'phone' }); out.phone = p.e164; }
+    if (req.query.email) { const e = contacts.parseEmail(req.query.email); if (!e.ok) return res.json({ ...out, error: e.error, field: 'email' }); out.email = e.email; }
+    const dup = contacts.findDuplicate({ phone: out.phone, email: out.email }, { exceptLeadId: Number(req.query.lead_id) || null, exceptAccountId: Number(req.query.account_id) || null });
+    if (dup) out.duplicate = { ...dup, message: contacts.duplicateMessage(dup) };
+    res.json(out);
   });
 
   // ── Quotations (CRM-10/11) ──
   r.get('/quotations', staff, (req, res) => {
     const rows = q.all(`SELECT * FROM quotations WHERE id IN (SELECT MAX(id) FROM quotations GROUP BY number) ORDER BY id DESC`);
     res.json(rows.map(quoteView));
+  });
+  r.get('/pricing/frequency', staff, (req, res) => {
+    const fErr = frequencyError(req.query.unit, Number(req.query.count));
+    if (fErr) return res.status(400).json({ error: fErr });
+    const visits = visitsPerMonth(req.query.unit, Number(req.query.count)), price = Math.max(0, Number(req.query.unit_price) || 0);
+    res.json({ unit: req.query.unit, count: Number(req.query.count), visits_per_month: visits, label: frequencyLabel(req.query.unit, Number(req.query.count)), line_total: money(visits * price) });
   });
   r.get('/quotations/:id', staff, (req, res) => {
     const qt = quoteView(q.get(`SELECT * FROM quotations WHERE id=?`, req.params.id));
@@ -783,44 +958,61 @@ function mountV3Routes(r, io) {
   r.get('/quotations/:id/pdf', staff, (req, res) => {
     const qv = quoteView(q.get(`SELECT * FROM quotations WHERE id=?`, req.params.id));
     if (!qv) return res.status(404).send('Not found');
-    res.type('html').send(quoteHtml(qv, { print: req.query.print === '1' }));
+    res.type('html').send(quoteHtml(qv, { print: req.query.print === '1', embed: req.query.embed === '1' }));
   });
-  // STEP 1 — send the quotation by Gmail (free). WhatsApp stays available as a manual fallback.
-  //   via: 'gmail' (default) | 'whatsapp' | 'pdf'
+  // STEP 1 — the quotation goes out by Gmail, and only after the sender has seen the preview.
+  const quoteBase = req => String((req.body && req.body.base_url) || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+  function recipientFor(req, lead) {
+    const raw = String(req.body?.to || lead.email || '').trim();
+    if (!raw) return { error: 'This lead has no email address. Add one to the lead, or type it here.', code: 'NO_EMAIL' };
+    const e = contacts.parseEmail(raw);
+    return e.ok ? { to: e.email } : { error: e.error, code: 'BAD_EMAIL' };
+  }
+  // The exact email + a token that proves it was looked at. Nothing is sent or logged here.
+  r.post('/quotations/:id/preview', staff, (req, res) => {
+    const qv = quoteView(q.get(`SELECT * FROM quotations WHERE id=?`, req.params.id));
+    if (!qv) return res.status(404).json({ error: 'Not found' });
+    if (!['draft', 'sent'].includes(qv.status)) return res.status(409).json({ error: `This quotation is ${qv.status} and can no longer be sent` });
+    const rc = recipientFor(req, qv.lead || {}); if (rc.error) return res.status(400).json(rc);
+    const mail = quoteMail(qv, rc.to, quoteBase(req));
+    const st = mailer.status();
+    res.json({ ok: true, to: mail.to, from: st.sender || null, from_name: st.from_name, reply_to: mail.replyTo || null, subject: mail.subject, html: mail.html, text: mail.text, link: mail.link,
+      delivery: st.configured ? 'sent' : 'compose', preview_token: previewToken(qv, mail),
+      quotation: { id: qv.id, number: qv.number, version: qv.version, total: qv.total, valid_until: qv.valid_until, customer: (qv.lead || {}).company || (qv.lead || {}).contact || '' } });
+  });
+  //   via: 'gmail' (default, needs preview_token) | 'whatsapp' | 'pdf'
   r.post('/quotations/:id/send', staff, async (req, res) => {
     const qv = quoteView(q.get(`SELECT * FROM quotations WHERE id=?`, req.params.id));
     if (!qv) return res.status(404).json({ error: 'Not found' });
     if (!['draft', 'sent'].includes(qv.status)) return res.status(409).json({ error: `This quotation is ${qv.status} and can no longer be sent` });
-    const base = (req.body && req.body.base_url) || `${req.protocol}://${req.get('host')}`;
-    const link = `${base}/q/${qv.share_token}`;
     const lead = qv.lead || {};
-    const text = `Hello ${lead.contact || ''}, here is your GreenLoop quotation ${qv.number} (v${qv.version}).\n` +
-      qv.items.map(i => `• ${i.description || i.service_code}${i.site ? ' — ' + i.site : ''}: ${i.qty} × AED ${i.unit_price}`).join('\n') +
-      `\nTotal incl. VAT 5%: AED ${qv.total.toFixed(2)} · valid until ${dmy(qv.valid_until)}.\nView / download PDF & accept: ${link}`;
     const via = ['whatsapp', 'pdf'].includes(req.body?.via) ? req.body.via : 'gmail';
-    const markSent = (how, to) => {
+    const markSent = (how, to, link) => {
       q.run(`UPDATE quotations SET status=CASE WHEN status='draft' THEN 'sent' ELSE status END, sent_via=?, sent_to=?, sent_at=datetime('now') WHERE id=?`, how, to || null, qv.id);
       if (lead.id) q.run(`UPDATE leads SET stage=CASE WHEN stage IN ('new','contacted','qualified') THEN 'quoted' ELSE stage END, updated_at=datetime('now') WHERE id=?`, lead.id);
       audit(req, 'quotation', qv.id, 'sent via ' + how, null, { link, to: to || null });
     };
     if (via !== 'gmail') {
-      markSent(via, via === 'whatsapp' ? lead.phone : null);
+      const link = `${quoteBase(req)}/q/${qv.share_token}`;
+      const text = quoteEmailText(qv, link);
+      markSent(via, via === 'whatsapp' ? lead.phone : null, link);
       return res.json({ ok: true, via, link, whatsapp_url: waLink(lead.phone, text), text });
     }
-    const to = String(req.body?.to || lead.email || '').trim();
-    if (!mailer.isEmail(to)) return res.status(400).json({ error: 'This lead has no email address. Add one to the lead (or type it here) to send by Gmail.', code: 'NO_EMAIL' });
-    const subject = `GreenLoop quotation ${qv.number} (v${qv.version}) — AED ${qv.total.toFixed(2)}`;
-    const mail = { to, subject, text, html: quoteEmailHtml(qv, link), replyTo: getSetting('company_email', '') };
+    const rc = recipientFor(req, lead); if (rc.error) return res.status(400).json(rc);
+    const mail = quoteMail(qv, rc.to, quoteBase(req));
+    const seen = String(req.body?.preview_token || '');
+    if (!seen) return res.status(428).json({ error: 'Preview the quotation email before sending it.', code: 'PREVIEW_REQUIRED' });
+    if (seen !== previewToken(qv, mail)) return res.status(409).json({ error: 'The quotation or the recipient changed after you previewed it. Preview it again before sending.', code: 'PREVIEW_STALE' });
     const st = mailer.status();
     if (!st.configured) {
       // Gmail not connected on the server yet → hand the user a pre-filled Gmail compose window
-      markSent('gmail', to);
-      return res.json({ ok: true, via: 'gmail', delivery: 'compose', to, link, gmail_compose_url: mailer.composeUrl(mail), text });
+      markSent('gmail', mail.to, mail.link);
+      return res.json({ ok: true, via: 'gmail', delivery: 'compose', to: mail.to, link: mail.link, gmail_compose_url: mailer.composeUrl(mail), text: mail.text });
     }
     try {
       await mailer.send(mail);
-      markSent('gmail', to);
-      res.json({ ok: true, via: 'gmail', delivery: 'sent', to, link, from: st.sender });
+      markSent('gmail', mail.to, mail.link);
+      res.json({ ok: true, via: 'gmail', delivery: 'sent', to: mail.to, link: mail.link, from: st.sender });
     } catch (e) {
       // nothing is marked as sent when the email did not go out
       res.status(e.status || 502).json({ error: `Email not sent: ${e.message}`, gmail_compose_url: mailer.composeUrl(mail) });
@@ -847,6 +1039,8 @@ function mountV3Routes(r, io) {
       if (!s.zone || !isFinite(Number(s.lat)) || !isFinite(Number(s.lng)) || s.lat === '' || s.lng === '')
         return res.status(400).json({ error: `Site "${s.name || s.address}" needs zone, lat and lng (enter once, no geocoding API)` });
     }
+    const dupC = contacts.findDuplicate({ phone: lead.phone, email: lead.email }, { exceptLeadId: lead.id });
+    if (dupC && dupC.type === 'customer') return res.status(409).json({ error: contacts.duplicateMessage(dupC), code: 'DUPLICATE', duplicate: dupC });
     const code = await uniquePortalCode();
     const start = qv.plan.start_date && qv.plan.start_date >= ymd() ? qv.plan.start_date : ymd();
     let accountId = null; const created = [];
@@ -862,7 +1056,7 @@ function mountV3Routes(r, io) {
       items.forEach(i => { byService[i.service_code] ||= i; });
       for (const [code2, it] of Object.entries(byService)) {
         const pi = q.run(`INSERT INTO service_plans(customer_id,service_code,recurrence,time_window,start_date,end_date,unit_price,billing,quotation_id) VALUES (?,?,?,?,?,?,?,?,?)`,
-          cid, code2, JSON.stringify(qv.plan.recurrence), qv.plan.time_window, start, qv.plan.end_date || null, it.unit_price, qv.plan.billing, qv.id);
+          cid, code2, JSON.stringify(recurrenceForLine(it, qv.plan.recurrence)), qv.plan.time_window, start, qv.plan.end_date || null, it.unit_price, qv.plan.billing, qv.id);
         created.push({ customer_id: cid, plan_id: Number(pi.lastInsertRowid) });
       }
     }
@@ -872,7 +1066,7 @@ function mountV3Routes(r, io) {
     created.forEach(c => { jobs += generatePlans({ planId: c.plan_id }).created; });
     audit(req, 'quotation', qv.id, 'convert → customer', null, { account_id: accountId, sites: sites.length, plans: created.length, jobs });
     const portal = `${req.protocol}://${req.get('host')}/customer/`;
-    const msg = `Welcome to GreenLoop, ${lead.contact}! Your customer app: ${portal}\nSign in with your mobile number ${lead.phone || ''} and store code: ${code}\nYou can also sign in with a one-time code sent to ${lead.phone || lead.email}.\nTurn on notifications in the app — your invoices (with PDF), visit proof and reminders arrive there.`;
+    const msg = `Welcome to GreenLoop, ${lead.contact}! Your customer app: ${portal}\nSign in with your mobile number ${lead.phone ? contacts.formatPhone(lead.phone) : ''} and your 4-digit code: ${code}\nYou can also ask the app to email you a one-time code${lead.email ? ' at ' + lead.email : ''}.\nTurn on notifications in the app — your invoices (with PDF), visit proof and reminders arrive there.`;
     io.to('staff').emit('ledger:refresh', {});
     // STEP 2 — registration: the app is waiting with a welcome message, access goes out by Gmail
     notifyCustomer(accountId, 'welcome', 'Welcome to GreenLoop', 'Your account is ready. Invoices, visit proof and reminders will arrive here — turn on notifications so you never miss one.', '/customer/');
@@ -1097,7 +1291,7 @@ function mountV3Routes(r, io) {
     const code = await uniquePortalCode();
     q.run(`UPDATE customers SET portal_code_hash=? WHERE id=?`, bcrypt.hashSync(code, 10), c.account_id || c.id);
     audit(req, 'customer', c.id, 'reset portal code', null, null);
-    res.json({ ok: true, portal_code: code, whatsapp_url: waLink(c.contact_phone, `Your GreenLoop portal code is ${code}. Sign in at the customer app with this mobile number and the code.`) });
+    res.json({ ok: true, portal_code: code, whatsapp_url: waLink(c.contact_phone, `Your GreenLoop app code is ${code}. Sign in to the customer app with this mobile number and the 4-digit code.`) });
   });
 
   // ── Not picked up: confirmation (CUS-10) + override ──
@@ -1202,7 +1396,7 @@ function mountV3Routes(r, io) {
     if (b.uae_holidays) setSetting('uae_holidays', JSON.stringify(b.uae_holidays.filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))));
     if (b.default_time_window && WIN_RX.test(b.default_time_window)) setSetting('default_time_window', b.default_time_window);
     if (b.invoice_due_days) setSetting('invoice_due_days', String(Number(b.invoice_due_days) || 15));
-    if (b.company_whatsapp) setSetting('company_whatsapp', b.company_whatsapp);
+    if (b.company_whatsapp) { const wp = contacts.parsePhone(b.company_whatsapp); if (!wp.ok) return res.status(400).json({ error: 'Company WhatsApp number: ' + wp.error }); setSetting('company_whatsapp', wp.e164); }
     if (b.company_email !== undefined) { if (b.company_email && !mailer.isEmail(b.company_email)) return res.status(400).json({ error: 'Company email is not a valid address' }); setSetting('company_email', b.company_email || ''); }
     if (b.shift_cutoff && /^\d{2}:\d{2}$/.test(b.shift_cutoff)) setSetting('shift_cutoff', b.shift_cutoff);
     audit(req, 'settings', null, 'update', null, b);
@@ -1237,34 +1431,59 @@ function mountV3Routes(r, io) {
   });
 
   // ── Customer portal additions ──
-  // OTP login (CUS-01): phone or email → 6-digit code, 10 min, 5 attempts
+  // One-time sign-in code (CUS-01): 6 digits, 10 minutes, 5 attempts.
+  // v3.3: the code is emailed through the Gmail account the quotations use (free). A customer
+  // who types their mobile number gets the code at the email address saved on their account.
+  function otpAccount(identifier) {
+    const id = String(identifier || '').trim();
+    if (!id) return { error: 'Enter your mobile number or email' };
+    if (id.includes('@')) {
+      const e = contacts.parseEmail(id); if (!e.ok) return { error: e.error };
+      const c = q.get(`SELECT * FROM customers WHERE is_active=1 AND lower(email)=? ORDER BY COALESCE(account_id,id)=id DESC LIMIT 1`, e.email);
+      return { channel: 'email', customer: c || null, typedEmail: e.email };
+    }
+    const p = contacts.parsePhone(id); if (!p.ok) return { error: p.error };
+    const c = q.all(`SELECT * FROM customers WHERE is_active=1 AND contact_phone IS NOT NULL AND contact_phone!=''`).find(x => contacts.samePhone(x.contact_phone, p.e164));
+    return { channel: 'phone', customer: c || null };
+  }
   r.post('/auth/customer-otp/request', (req, res) => {
-    const id = String(req.body?.identifier || '').trim();
-    if (!id) return res.status(400).json({ error: 'Enter your phone or email' });
-    const digits = id.replace(/[^\d]/g, '');
-    const c = id.includes('@')
-      ? q.get(`SELECT * FROM customers WHERE is_active=1 AND lower(email)=lower(?) ORDER BY COALESCE(account_id,id)=id DESC LIMIT 1`, id)
-      : q.all(`SELECT * FROM customers WHERE is_active=1 AND contact_phone IS NOT NULL`).find(x => digits.length >= 7 && String(x.contact_phone).replace(/[^\d]/g, '').endsWith(digits.slice(-9)));
-    // same response either way (no account enumeration)
-    const generic = { ok: true, message: 'If this number/email is registered, a code has been sent.' };
+    const who = otpAccount(req.body?.identifier);
+    if (who.error) return res.status(400).json({ error: who.error });
+    // same response whether or not the account exists (no account enumeration)
+    const generic = { ok: true, message: 'If this mobile number or email is registered, we have emailed a 6-digit code to the address on the account. It is valid for 10 minutes.' };
+    const c = who.customer;
     if (!c) return res.json(generic);
     const acct = c.account_id || c.id;
+    const account = q.get(`SELECT * FROM customers WHERE id=?`, acct) || c;
     const code = String(crypto.randomInt(100000, 1000000));
     q.run(`DELETE FROM otp_codes WHERE customer_id=?`, acct);
-    q.run(`INSERT INTO otp_codes(customer_id,channel,code_hash,expires_at) VALUES (?,?,?,?)`, acct, id.includes('@') ? 'email' : 'phone',
+    q.run(`INSERT INTO otp_codes(customer_id,channel,code_hash,expires_at) VALUES (?,?,?,?)`, acct, who.channel,
       bcrypt.hashSync(code, 8), new Date(Date.now() + 10 * 60e3).toISOString());
-    // Delivery: no SMS/e-mail gateway configured in v3 → dev mode returns the code; wire a provider here.
+    const to = who.typedEmail || [account.email, c.email].find(e => contacts.parseEmail(e).ok) || null;
+    const mailOn = mailer.status().configured;
+    if (mailOn && to) {
+      // not awaited: the reply must not take longer for a registered account than for an unknown one
+      mailer.send({ to, subject: `${code} is your GreenLoop sign-in code`, replyTo: getSetting('company_email', ''),
+        text: `Your GreenLoop sign-in code is ${code}\n\nIt is valid for 10 minutes. If you did not ask for it, ignore this email.\n\nGreenLoop`,
+        html: `<div style="font:15px/1.55 'Segoe UI',-apple-system,Arial,sans-serif;color:#13231f;max-width:480px;margin:0 auto;padding:8px 4px">
+          <p style="margin:0 0 14px;padding-bottom:12px;border-bottom:2px solid #13231f;font-size:19px;font-weight:700">GreenLoop</p>
+          <p style="margin:0 0 8px">Your sign-in code for ${h(account.name)}</p>
+          <p style="margin:0 0 16px;font-size:34px;font-weight:700;letter-spacing:6px">${code}</p>
+          <p style="margin:0;font-size:13px;color:#55645f">It is valid for 10 minutes. If you did not ask for it, ignore this email.</p></div>` })
+        .catch(e => alertCrm('OTP_NOT_SENT', 'warning', `Sign-in code for ${account.name} could not be emailed to ${to}: ${e.message}`));
+    } else if (mailOn && !to) {
+      alertCrm('OTP_NOT_SENT', 'info', `${account.name} asked for a sign-in code but has no email on the account. Add one in Customers, or give them their 4-digit app code.`);
+    }
     const out = { ...generic };
-    if (process.env.OTP_DEV !== '0') out.dev_code = code;
+    // Demo mode shows the code on screen. It is off as soon as Gmail is connected, unless OTP_DEV=1 forces it.
+    if (process.env.OTP_DEV === '1' || (process.env.OTP_DEV !== '0' && !mailOn)) out.dev_code = code;
     res.json(out);
   });
   r.post('/auth/customer-otp/verify', (req, res) => {
-    const id = String(req.body?.identifier || '').trim(), code = String(req.body?.code || '');
-    const digits = id.replace(/[^\d]/g, '');
-    const c = id.includes('@')
-      ? q.get(`SELECT * FROM customers WHERE is_active=1 AND lower(email)=lower(?) LIMIT 1`, id)
-      : q.all(`SELECT * FROM customers WHERE is_active=1 AND contact_phone IS NOT NULL`).find(x => digits.length >= 7 && String(x.contact_phone).replace(/[^\d]/g, '').endsWith(digits.slice(-9)));
-    if (!c) return res.status(401).json({ error: 'Invalid or expired code' });
+    const code = String(req.body?.code || '');
+    const who = otpAccount(req.body?.identifier);
+    const c = who.customer;
+    if (who.error || !c) return res.status(401).json({ error: 'Invalid or expired code' });
     const acct = c.account_id || c.id;
     const row = q.get(`SELECT * FROM otp_codes WHERE customer_id=? ORDER BY id DESC LIMIT 1`, acct);
     if (!row || row.expires_at < nowIso() || row.attempts >= 5) return res.status(401).json({ error: 'Invalid or expired code' });
@@ -1394,6 +1613,7 @@ function mountV3Routes(r, io) {
   r.get('/driver/jobs-v3', need('driver'), (req, res) => {
     const today = ymd();
     const rows = q.all(`SELECT p.id, p.status, p.stage, p.seq, p.time_window, p.service_type, p.confirmation_status, p.is_revisit,
+        p.started_at, p.arrived_at, p.completed_at, p.arrival_photo_url,
         c.name, c.branch, c.zone, c.address, c.lat, c.lng, c.access_notes, c.contact_phone, st.name service_name, st.category, st.checklist
       FROM pickups p JOIN customers c ON c.id=p.customer_id LEFT JOIN service_types st ON st.code=p.service_type
       WHERE p.scheduled_date=? AND p.driver_id=? AND p.status!='rescheduled' ORDER BY p.seq`, today, req.user.id);
@@ -1496,13 +1716,13 @@ function seedDemo() {
     q.run(`UPDATE vehicles SET service_tags='waste,pest' WHERE fleet_number='TRUCK-02'`);
     const L = (contact, company, phone, st, stage, src, sites, days) => q.run(
       `INSERT INTO leads(contact,company,phone,service_type,sites,frequency,source,stage,owner_id,follow_up_at,created_at) VALUES (?,?,?,?,?,?,?,?,1,?,datetime('now',?))`,
-      contact, company, phone, st, JSON.stringify(sites), 'weekly', src, stage, addDays(ymd(), 2) + 'T10:00:00.000Z', `-${days} days`);
+      contact, company, phone, st, JSON.stringify(sites), 'weekly:3', src, stage, addDays(ymd(), 2) + 'T10:00:00.000Z', `-${days} days`);
     L('Omar Khalid', 'Spice Route Restaurant', '+971502223344', 'WASTE', 'new', 'website', [{ name: 'Karama', zone: 'Downtown', lat: 25.2425, lng: 55.3031, address: 'Karama St 12' }], 1);
     L('Fatima Noor', 'Cool Mart Group', '+971503334455', 'WASTE', 'contacted', 'referral', [{ name: 'Marina Walk', zone: 'Marina', lat: 25.0781, lng: 55.1391 }, { name: 'JBR', zone: 'Marina', lat: 25.0775, lng: 55.1332 }], 3);
     L('Arjun Mehta', 'Golden Fork Bakery', '+971504445566', 'PEST_GENERAL', 'lost', 'whatsapp', [{ name: 'Deira', zone: 'Deira', lat: 25.2711, lng: 55.3075 }], 12);
     const lid = Number(q.run(`INSERT INTO leads(contact,company,phone,email,service_type,sites,frequency,source,stage,owner_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,1,datetime('now','-2 days'))`,
-      'Layla Hassan', 'Harbour Seafood', '+971505556677', 'layla@harbour.ae', 'WASTE', JSON.stringify([{ name: 'Al Mina', zone: 'Deira', lat: 25.2632, lng: 55.2912, address: 'Port Rashid Rd' }]), 'weekly', 'walk-in', 'quoted').lastInsertRowid);
-    const calc = calcQuote([{ service_code: 'WASTE', description: 'Machari waste pickup — 3x weekly', qty: 13, unit_price: 160 }, { service_code: 'PEST_GENERAL', description: 'Monthly pest treatment', qty: 1, unit_price: 450 }]);
+      'Layla Hassan', 'Harbour Seafood', '+971505556677', 'layla@harbour.ae', 'WASTE', JSON.stringify([{ name: 'Al Mina', zone: 'Deira', lat: 25.2632, lng: 55.2912, address: 'Port Rashid Rd' }]), 'weekly:3', 'walk-in', 'quoted').lastInsertRowid);
+    const calc = calcQuote([{ service_code: 'WASTE', description: 'Machari waste pickup', freq_unit: 'weekly', freq_count: 3, unit_price: 160 }, { service_code: 'PEST_GENERAL', description: 'Pest treatment', freq_unit: 'monthly', freq_count: 1, unit_price: 450 }]);
     q.run(`INSERT INTO quotations(lead_id,number,version,items,plan,subtotal,vat,total,valid_until,status,sent_via,sent_at,share_token,created_by,created_at) VALUES (?,?,1,?,?,?,?,?,?,'sent','whatsapp',datetime('now','-1 days'),?,1,datetime('now','-1 days'))`,
       lid, 'QT-' + new Date().getFullYear() + '-0001', JSON.stringify(calc.items),
       JSON.stringify({ recurrence: { type: 'weekly', days: [0, 2, 4] }, time_window: '06:00-10:00', billing: 'monthly' }),
@@ -1524,6 +1744,6 @@ ensureSchema();
 
 module.exports = {
   mountV3Routes, guard, start, validateProof, rejectProof, onPickupCompleted, onNotPickedUp, notifyCustomer, notifyVehicleDrivers, dmy,
-  generatePlans, occursOn, describeRule, calcQuote, haversineM, autoConfirm, atRiskCheck, allocate,
+  generatePlans, occursOn, describeRule, calcQuote, visitsPerMonth, frequencyLabel, parseFrequency, recurrenceForLine, haversineM, autoConfirm, atRiskCheck, allocate,
   alertCrm, flagLateProof, generatePlansBatched, dailyBackup, dailyJobs,
 };

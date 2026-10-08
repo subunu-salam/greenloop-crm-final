@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────
 // GreenLoop Customer v3 — Today · Plans · Bills · Proof · More
-// Login: store code or OTP (CUS-01) · site switcher (CUS-12)
+// Login: mobile number + 4-digit code, or a one-time code by email (CUS-01) · site switcher (CUS-12)
 // Live tracking, confirm/dispute not-picked-up (CUS-10), plans & one-off
 // booking (CUS-06/07), invoices & balance (CUS-08), quotations (CUS-11),
 // notifications (CUS-13), filtered history + PDF (CUS-03)
@@ -31,10 +31,10 @@ function loginMode(m) {
   $('#login-code').classList.toggle('hidden', m !== 'code'); $('#login-otp').classList.toggle('hidden', m !== 'otp');
   $('#login-msg').textContent = '';
 }
-// Codes are 6 digits (older accounts: 4). Auto-submit at 6; Sign in button from 4.
-function pinKey(n) { if (pin.length >= 6) return; pin += String(n); renderDots(); if (pin.length === 6) doLogin(); }
+// The code is 4 digits and signs in as soon as the fourth is typed.
+function pinKey(n) { if (pin.length >= 4) return; pin += String(n); renderDots(); if (pin.length === 4) doLogin(); }
 function pinDel() { pin = pin.slice(0, -1); renderDots(); $('#login-msg').textContent = ''; }
-function renderDots() { [...$('#pin-dots').children].forEach((d, i) => d.classList.toggle('on', i < pin.length)); const b = $('#code-go'); if (b) b.disabled = pin.length < 4; }
+function renderDots() { [...$('#pin-dots').children].forEach((d, i) => d.classList.toggle('on', i < pin.length)); }
 function signedIn(data) {
   token = data.token; me = data.customer;
   localStorage.setItem('gl_cust_token', token); localStorage.setItem('gl_cust_me', JSON.stringify(me));
@@ -48,23 +48,38 @@ async function post(path, body) {
 }
 async function doLogin() {
   $('#login-msg').textContent = '';
-  const phone = ($('#login-phone').value || '').trim();
-  if (!phone) { $('#login-msg').textContent = 'Enter the mobile number on your account first'; pin = ''; renderDots(); $('#login-phone').focus(); return; }
-  try { localStorage.setItem('gl_cust_phone', phone); signedIn(await post('/auth/customer-login', { phone, code: pin })); }
+  const ph = GLPhone.read('login-phone');
+  if (!ph.ok || ph.empty) { $('#login-msg').textContent = ph.ok ? 'Enter the mobile number on your account first' : ph.error; pin = ''; renderDots(); $('#login-phone').focus(); return; }
+  try { localStorage.setItem('gl_cust_phone', ph.e164); signedIn(await post('/auth/customer-login', { phone: ph.e164, code: pin })); }
   catch (e) { $('#login-msg').textContent = e.message; }
   pin = ''; renderDots();
 }
+// one-time code by email: found by mobile number (default) or by email address
+let otpMode = 'phone';
+function otpBy() {
+  otpMode = otpMode === 'phone' ? 'email' : 'phone';
+  $('#otp-by-phone').classList.toggle('hidden', otpMode !== 'phone'); $('#otp-by-email').classList.toggle('hidden', otpMode !== 'email');
+  $('#otp-switch').textContent = otpMode === 'phone' ? 'Use my email address instead' : 'Use my mobile number instead';
+  $('#otp-step2').classList.add('hidden'); $('#login-msg').textContent = '';
+}
+function otpIdentifier() {
+  if (otpMode === 'email') { const e = $('#otp-email').value.trim(); return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e) ? { id: e } : { error: 'Enter the email address on your account' }; }
+  const ph = GLPhone.read('otp-phone');
+  return !ph.ok ? { error: ph.error } : ph.empty ? { error: 'Enter the mobile number on your account' } : { id: ph.e164 };
+}
 async function otpRequest() {
   $('#login-msg').textContent = '';
+  const who = otpIdentifier(); if (who.error) { $('#login-msg').textContent = who.error; return; }
   try {
-    const r = await post('/auth/customer-otp/request', { identifier: $('#otp-id').value.trim() });
+    const r = await post('/auth/customer-otp/request', { identifier: who.id });
     $('#otp-step2').classList.remove('hidden');
-    $('#otp-dev').innerHTML = r.dev_code ? `Demo mode — your code is <b>${esc(r.dev_code)}</b>` : esc(r.message);
-    $('#otp-code').focus();
+    $('#otp-dev').innerHTML = r.dev_code ? `Demo mode: your code is <b>${esc(r.dev_code)}</b>` : esc(r.message);
+    $('#otp-code').value = ''; $('#otp-code').focus();
   } catch (e) { $('#login-msg').textContent = e.message; }
 }
 async function otpVerify() {
-  try { signedIn(await post('/auth/customer-otp/verify', { identifier: $('#otp-id').value.trim(), code: $('#otp-code').value.trim() })); }
+  const who = otpIdentifier(); if (who.error) { $('#login-msg').textContent = who.error; return; }
+  try { signedIn(await post('/auth/customer-otp/verify', { identifier: who.id, code: $('#otp-code').value.trim() })); }
   catch (e) { $('#login-msg').textContent = e.message; }
 }
 
@@ -455,5 +470,9 @@ document.addEventListener('glpush:change', () => { const c = $('#push-card'); if
 if (token && me) boot();
 else $('#s-login').classList.remove('hidden');
 
-// Remember the mobile number used last time on this device.
-try { const lp = localStorage.getItem('gl_cust_phone'); if (lp && document.getElementById('login-phone')) document.getElementById('login-phone').value = lp; } catch {}
+// Mobile number fields: country code + number. The number used last time is remembered on this device.
+try {
+  const lp = localStorage.getItem('gl_cust_phone') || '';
+  $('#login-phone-slot').innerHTML = GLPhone.html('login-phone', lp, { autocomplete: 'tel-national' });
+  $('#otp-phone-slot').innerHTML = GLPhone.html('otp-phone', lp, { autocomplete: 'tel-national' });
+} catch (e) { console.warn('phone field', e); }

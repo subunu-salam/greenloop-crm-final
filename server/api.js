@@ -14,6 +14,8 @@ const sla = require('./services/sla');
 const v3 = require('./v3');
 const security = require('./security');
 const capacity = require('./capacity');
+const contacts = require('./contacts');
+const shifts = require('./driver-shift');   // also adds the job-timing columns used below
 
 require('./security').ensureSecret();
 const SECRET = process.env.JWT_SECRET;
@@ -92,6 +94,7 @@ module.exports = function buildApi(io) {
     if (denied) return res.status(denied[0]).json({ error: denied[1] });
     if (!['pending', 'overdue'].includes(p.status)) return res.status(409).json({ error: `Already ${p.status}` });
     q.run(`UPDATE pickups SET stage='acknowledged', updated_at=datetime('now') WHERE id=?`, p.id);
+    shifts.onJobStarted(p, req.user);   // job timer starts; opens a shift if the driver forgot to clock in
     const info = q.get(`SELECT c.name, c.branch FROM pickups p JOIN customers c ON c.id=p.customer_id WHERE p.id=?`, p.id);
     io.to('staff').emit('pickup:ack', { id: p.id, customer: info.name, branch: info.branch, driver: req.user.name });
     try { v3.notifyCustomer(p.customer_id, 'on_way', 'Driver on the way', `${req.user.name} has started your visit at ${info.name} ${info.branch || ''}`); } catch {}
@@ -267,26 +270,52 @@ module.exports = function buildApi(io) {
         AND p.scheduled_date LIKE strftime('%Y-%m','now') || '%') AS collected_this_month
       FROM customers c ORDER BY c.zone, c.name`));
   });
+  // Mobile + email identify a customer account. One format, validated, and never shared
+  // with another account (sites of the SAME account share them).
+  //   → { phone, email, link } or { status, body }
+  function customerContacts(body, existing = null) {
+    const out = { phone: existing ? existing.contact_phone || '' : '', email: existing ? existing.email || '' : '', link: null };
+    if (body.contact_phone !== undefined && String(body.contact_phone || '') !== (existing ? existing.contact_phone || '' : '\u0000')) {
+      if (!String(body.contact_phone || '').trim()) out.phone = '';
+      else { const p = contacts.parsePhone(body.contact_phone); if (!p.ok) return { status: 400, body: { error: p.error, field: 'contact_phone' } }; out.phone = p.e164; }
+    }
+    if (body.email !== undefined && String(body.email || '') !== (existing ? existing.email || '' : '\u0000')) {
+      if (!String(body.email || '').trim()) out.email = '';
+      else { const e = contacts.parseEmail(body.email); if (!e.ok) return { status: 400, body: { error: e.error, field: 'email' } }; out.email = e.email; }
+    }
+    const changed = !existing || out.phone !== (existing.contact_phone || '') || out.email !== (existing.email || '');
+    if (changed && (out.phone || out.email)) {
+      const own = existing ? (existing.account_id || existing.id) : null;
+      const dup = contacts.findDuplicate({ phone: out.phone, email: out.email }, { exceptAccountId: own });
+      if (dup) {
+        // a new site for an existing customer is fine once the office says so
+        if (!existing && dup.type === 'customer' && Number(body.link_account_id) === Number(dup.id)) out.link = dup.id;
+        else return { status: 409, body: { error: contacts.duplicateMessage(dup), code: 'DUPLICATE', duplicate: dup, can_link: !existing && dup.type === 'customer' } };
+      }
+    }
+    return out;
+  }
   r.post('/customers', auth('admin'), (req, res) => {
-    const { name, branch, zone, frequency, lat, lng, address, contact_phone } = req.body || {};
+    const { name, branch, zone, frequency, lat, lng, address } = req.body || {};
     if (!name || !zone || !lat || !lng) return res.status(400).json({ error: 'name, zone, lat, lng required' });
     if (![2, 3].includes(Number(frequency))) return res.status(400).json({ error: 'frequency must be 2 or 3' });
     if (String(name).length > 160 || String(branch || '').length > 160) return res.status(400).json({ error: 'Name or branch is too long (max 160 characters)' });
-    if (contact_phone && !security.isPhone(contact_phone)) return res.status(400).json({ error: 'Phone number looks wrong — use digits, e.g. +971 50 123 4567' });
     if (!(Math.abs(Number(lat)) <= 90 && Math.abs(Number(lng)) <= 180)) return res.status(400).json({ error: 'Location (lat/lng) is out of range' });
-    const info = q.run(`INSERT INTO customers(name,branch,zone,frequency,lat,lng,address,contact_phone)
-      VALUES (?,?,?,?,?,?,?,?)`, name, branch || '', zone, Number(frequency), Number(lat), Number(lng), address || '', contact_phone || '');
-    res.json({ ok: true, id: Number(info.lastInsertRowid) });
+    const ct = customerContacts(req.body || {}); if (ct.status) return res.status(ct.status).json(ct.body);
+    const info = q.run(`INSERT INTO customers(name,branch,zone,frequency,lat,lng,address,contact_phone,email,account_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`, name, branch || '', zone, Number(frequency), Number(lat), Number(lng), address || '', ct.phone, ct.email, ct.link);
+    if (ct.link) q.run(`UPDATE customers SET account_id=? WHERE id=? AND account_id IS NULL`, ct.link, ct.link);
+    res.json({ ok: true, id: Number(info.lastInsertRowid), linked_account: ct.link });
   });
   r.put('/customers/:id', auth('admin'), (req, res) => {
     const c = q.get(`SELECT * FROM customers WHERE id=?`, req.params.id);
     if (!c) return res.status(404).json({ error: 'Not found' });
     const b = { ...c, ...req.body };
     if (!b.name || String(b.name).length > 160) return res.status(400).json({ error: 'Name is required (max 160 characters)' });
-    if (req.body && req.body.contact_phone && !security.isPhone(req.body.contact_phone)) return res.status(400).json({ error: 'Phone number looks wrong — use digits, e.g. +971 50 123 4567' });
     if (!(Math.abs(Number(b.lat)) <= 90 && Math.abs(Number(b.lng)) <= 180)) return res.status(400).json({ error: 'Location (lat/lng) is out of range' });
-    q.run(`UPDATE customers SET name=?,branch=?,zone=?,frequency=?,lat=?,lng=?,address=?,contact_phone=?,is_active=? WHERE id=?`,
-      b.name, b.branch, b.zone, Number(b.frequency), Number(b.lat), Number(b.lng), b.address, b.contact_phone, b.is_active ? 1 : 0, c.id);
+    const ct = customerContacts(req.body || {}, c); if (ct.status) return res.status(ct.status).json(ct.body);
+    q.run(`UPDATE customers SET name=?,branch=?,zone=?,frequency=?,lat=?,lng=?,address=?,contact_phone=?,email=?,is_active=? WHERE id=?`,
+      b.name, b.branch, b.zone, Number(b.frequency), Number(b.lat), Number(b.lng), b.address, ct.phone, ct.email, b.is_active ? 1 : 0, c.id);
     res.json({ ok: true });
   });
 
@@ -337,8 +366,20 @@ module.exports = function buildApi(io) {
       }
       const dup = q.get(`SELECT id FROM customers WHERE name = ? AND COALESCE(branch,'') = ?`, name, branch);
       if (dup) { skipped++; continue; }
-      q.run(`INSERT INTO customers(name,branch,zone,frequency,lat,lng,address,contact_phone) VALUES (?,?,?,?,?,?,?,?)`,
-        name, branch, zone, frequency, lat, lng, g('address'), g('contact_phone'));
+      // same contact rules as the form: valid format, and not already used by another customer or lead
+      let phone = '', email = '', link = null;
+      if (g('contact_phone')) { const ph = contacts.parsePhone(g('contact_phone')); if (!ph.ok) { errors.push(`Row ${i + 1} (${name}): ${ph.error}`); continue; } phone = ph.e164; }
+      if (g('email')) { const em = contacts.parseEmail(g('email')); if (!em.ok) { errors.push(`Row ${i + 1} (${name}): ${em.error}`); continue; } email = em.email; }
+      const taken = (phone || email) ? contacts.findDuplicate({ phone, email }) : null;
+      if (taken) {
+        // another branch of the same business joins that customer's account; anything else is a duplicate
+        const owner = taken.type === 'customer' ? q.get(`SELECT id, name FROM customers WHERE id=?`, taken.id) : null;
+        if (owner && owner.name.trim().toLowerCase() === name.toLowerCase()) link = owner.id;
+        else { errors.push(`Row ${i + 1} (${name}): ${contacts.duplicateMessage(taken)}`); continue; }
+      }
+      q.run(`INSERT INTO customers(name,branch,zone,frequency,lat,lng,address,contact_phone,email,account_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        name, branch, zone, frequency, lat, lng, g('address'), phone, email, link);
+      if (link) q.run(`UPDATE customers SET account_id=? WHERE id=? AND account_id IS NULL`, link, link);
       imported++;
     }
     if (imported) q.run(`INSERT INTO alerts(type,severity,message) VALUES ('INFO','info',?)`,
@@ -364,6 +405,7 @@ module.exports = function buildApi(io) {
       if (clash) return res.status(409).json({ error: 'PIN already in use — choose another' });
     }
     if (role === 'admin' && q.get(`SELECT id FROM users WHERE username=?`, username)) return res.status(409).json({ error: 'Username taken' });
+    if (phone) { const ph = contacts.parsePhone(phone); if (!ph.ok) return res.status(400).json({ error: ph.error, field: 'phone' }); phone = ph.e164; }
     const info = q.run(`INSERT INTO users(full_name,role,crm_role,username,password_hash,pin_hash,phone,vehicle_id) VALUES (?,?,?,?,?,?,?,?)`,
       full_name, role, role === 'admin' ? crmRole : null, username || null, password ? bcrypt.hashSync(password, 10) : null,
       pin ? bcrypt.hashSync(String(pin), 10) : null, phone || '', vehicle_id || null);
@@ -372,7 +414,8 @@ module.exports = function buildApi(io) {
   r.put('/users/:id', auth('admin'), (req, res) => {
     const u = q.get(`SELECT * FROM users WHERE id=?`, req.params.id);
     if (!u) return res.status(404).json({ error: 'Not found' });
-    const { full_name, phone, vehicle_id, is_active, pin, password } = req.body || {};
+    let { full_name, phone, vehicle_id, is_active, pin, password } = req.body || {};
+    if (phone && phone !== u.phone) { const ph = contacts.parsePhone(phone); if (!ph.ok) return res.status(400).json({ error: ph.error, field: 'phone' }); phone = ph.e164; }
     q.run(`UPDATE users SET full_name=?, phone=?, vehicle_id=?, is_active=? WHERE id=?`,
       full_name ?? u.full_name, phone ?? u.phone,
       vehicle_id !== undefined ? vehicle_id : u.vehicle_id,
@@ -430,6 +473,7 @@ module.exports = function buildApi(io) {
     const rows = q.all(
       `SELECT p.id, p.seq, p.status, p.completed_at, p.photo_url, p.anomaly_reason, p.gps_lat, p.gps_lng, p.notes,
               p.service_type, p.time_window, p.confirmation_status, p.proof_meta, p.is_revisit,
+              p.started_at, p.arrived_at, p.arrival_photo_url, p.arrival_distance_m, p.driver_id,
               (SELECT category FROM service_types st WHERE st.code=p.service_type) AS category,
               c.name, c.branch, c.zone, v.fleet_number, u.full_name AS driver
        FROM pickups p

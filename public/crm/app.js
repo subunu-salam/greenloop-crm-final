@@ -105,7 +105,7 @@ async function api(path, opts = {}) {
   });
   if (res.status === 401) { logout(); throw new Error('Session expired'); }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) { const err = new Error(data.error || res.statusText); err.status = res.status; err.data = data; throw err; }
   return data;
 }
 
@@ -144,6 +144,8 @@ async function boot() {
   socket.on('alert', d => { toast(d.message, d.severity); bumpBadge(); });
   socket.on('ledger:refresh', () => refreshIf(['dashboard','ledger','fleet','confirmations','plans']));
   socket.on('fleet:report', () => refreshIf(['maintenance']));
+  socket.on('shift:changed', () => refreshIf(['ledger']));
+  socket.on('pickup:arrived', () => refreshIf(['ledger']));
   socket.on('lead:changed', () => refreshIf(['leads','pipeline','quotations']));
   socket.emit('ops:join');
   nav('dashboard');
@@ -201,7 +203,7 @@ function setBadge(n) {
 function bumpBadge() { const b = $('#alert-badge'); if (!b) return; b.classList.remove('hidden'); b.textContent = (Number(b.textContent) || 0) + 1; }
 
 // ── modal helpers ────────────────────────────────────────────
-function openModal(html, wide) { $('#modal').className = 'modal' + (wide ? ' wide' : ''); $('#modal').innerHTML = html; $('#modal-wrap').classList.remove('hidden'); }
+function openModal(html, wide) { $('#modal').className = 'modal' + (wide === 'xl' ? ' wide xl' : wide ? ' wide' : ''); $('#modal').innerHTML = html; $('#modal-wrap').classList.remove('hidden'); $('#modal').scrollTop = 0; }
 function closeModal() { $('#modal-wrap').classList.add('hidden'); }
 function field(label, inner) { return `<div class="field"><label>${label}</label>${inner}</div>`; }
 
@@ -381,7 +383,8 @@ function viewPhoto(url) { openModal(`<img class="photo-full" src="${url}"><br><b
 // DAILY ROUTE LEDGER MATRIX
 async function ledger(dateArg) {
   const date = typeof dateArg === 'string' ? dateArg : new Date().toISOString().slice(0, 10);
-  const d = await api('/ledger?date=' + date);
+  const [d, sh] = await Promise.all([api('/ledger?date=' + date), api('/shifts?date=' + date).catch(() => ({ rows: [] }))]);
+  const shiftOf = {}; sh.rows.forEach(x => { if (x.fleet_number) (shiftOf[x.fleet_number] ||= []).push(x); });
   const byVehicle = {};
   d.rows.forEach(r => { (byVehicle[r.fleet_number || 'Unassigned'] ||= []).push(r); });
   $('#main').innerHTML = `
@@ -396,16 +399,38 @@ async function ledger(dateArg) {
     </div>
     ${Object.entries(byVehicle).map(([veh, rows]) => `
       <div class="card"><h3>${icon('truck', 15)} ${veh} <span class="muted small">— ${rows.length} stops</span></h3>
-      <div class="scroll-x"><table><tr><th>#</th><th>Client</th><th>Service</th><th>Window</th><th>Driver</th><th>Status</th><th>Completed</th><th>Proof</th><th>GPS check</th></tr>
+      ${(shiftOf[veh] || []).map(shiftLine).join('')}
+      <div class="scroll-x"><table><tr><th>#</th><th>Client</th><th>Service</th><th>Window</th><th>Driver</th><th>Status</th><th>Times</th><th>Proof</th><th>GPS check</th></tr>
       ${rows.map(r => `<tr>
         <td>${r.seq}</td><td><b>${esc(r.name)}</b><br><span class="muted small">${esc(r.branch)}</span></td>
         <td><span class="pill ${r.category || 'waste'}">${esc(r.service_type || 'WASTE')}</span>${r.is_revisit ? ' <span class="pill rescheduled">revisit</span>' : ''}</td>
         <td class="small">${esc(r.time_window || '—')}</td><td>${esc(r.driver || '—')}</td>
         <td><span class="pill ${r.status}">${r.status}</span>${r.anomaly_reason ? '<br><span class="muted small">' + r.anomaly_reason.replace(/_/g,' ') + '</span>' : ''}${r.confirmation_status ? `<br><span class="pill ${r.confirmation_status}">${r.confirmation_status.replace('_', ' ')}</span>` : ''}</td>
-        <td class="muted small">${r.completed_at ? dmyTime(r.completed_at) : '—'}</td>
+        <td class="small">${jobTimesCell(r)}</td>
         <td>${r.photo_url ? `<img class="photo-thumb" src="${r.photo_url}" onclick="viewPhoto('${r.photo_url}')">` : '—'}</td>
         <td class="small">${proofCell(r)}</td>
       </tr>`).join('')}</table></div></div>`).join('') || '<div class="card"><p class="muted">No routes scheduled for this date.</p></div>'}`;
+}
+// clock times in the office's own time zone, durations as "9 min" / "1 h 05 min"
+const clock = iso => { const t = new Date(iso); return isNaN(t) ? '' : String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0'); };
+const mins = s => { if (s == null) return ''; const m = Math.round(s / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`; };
+const gap = (a, b) => (a && b ? Math.max(0, (Date.parse(b) - Date.parse(a)) / 1000) : null);
+// Start → arrival (GPS photo) → finish, with how long the drive and the stop took
+function jobTimesCell(r) {
+  if (!r.started_at && !r.arrived_at && !r.completed_at) return '<span class="muted">—</span>';
+  const parts = [];
+  if (r.started_at) parts.push(`Started ${clock(r.started_at)}`);
+  if (r.arrived_at) parts.push(`arrived ${clock(r.arrived_at)}${r.started_at ? ` <span class="muted">(${mins(gap(r.started_at, r.arrived_at))} drive)</span>` : ''}`);
+  if (r.completed_at) parts.push(`${r.status === 'canceled' ? 'reported' : 'finished'} ${clock(r.completed_at)}${r.arrived_at ? ` <span class="muted">(${mins(gap(r.arrived_at, r.completed_at))} on site)</span>` : ''}`);
+  return parts.join('<br>');
+}
+// one driver's shift for the day, shown above their truck's stops
+function shiftLine(x) {
+  const first = x.shifts[0], last = x.shifts[x.shifts.length - 1];
+  const state = !first ? '<span class="pill pending">not clocked in</span>'
+    : x.on_shift ? `<span class="pill collected">on shift</span> since ${clock(last.clock_in_at)}`
+    : `<span class="pill expired">clocked out</span> ${clock(first.clock_in_at)} to ${clock(last.clock_out_at)}`;
+  return `<p class="shiftline">${icon('clock', 13)} <b>${esc(x.driver)}</b> ${state}${first ? ` <span class="muted">shift ${mins(x.shift_s)}, on jobs ${mins(x.job_s)}, ${x.jobs_done}/${x.jobs_total} stops reported</span>` : ''}${first && first.auto_in ? ' <span class="muted">(started a job without clocking in)</span>' : ''}</p>`;
 }
 function proofCell(r) {
   let m = {}; try { m = JSON.parse(r.proof_meta || '{}'); } catch {}
@@ -416,7 +441,7 @@ function proofCell(r) {
 }
 async function ledgerCsv(date) {
   const d = await api('/ledger?date=' + date);
-  const cols = ['fleet_number', 'seq', 'name', 'branch', 'zone', 'service_type', 'time_window', 'driver', 'status', 'anomaly_reason', 'confirmation_status', 'completed_at', 'photo_url', 'gps_lat', 'gps_lng'];
+  const cols = ['fleet_number', 'seq', 'name', 'branch', 'zone', 'service_type', 'time_window', 'driver', 'status', 'anomaly_reason', 'confirmation_status', 'started_at', 'arrived_at', 'arrival_distance_m', 'completed_at', 'photo_url', 'gps_lat', 'gps_lng'];
   const csv = [cols.join(','), ...d.rows.map(r => cols.map(c => `"${String(r[c] ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = `ledger_${date}.csv`; a.click();
 }
@@ -554,7 +579,7 @@ async function customers() {
       <button class="btn primary" onclick="customerForm()">${icon('plus', 13)} Add customer</button>
       <button class="btn ghost" onclick="document.getElementById('csv-input').click()">${icon('upload', 13)} Import CSV</button>
       <input type="file" id="csv-input" accept=".csv,text/csv" hidden onchange="importCsv(this)">
-      <span class="muted small">Columns: name, branch, zone, frequency (2/3), lat, lng, address, contact_phone</span>
+      <span class="muted small">Columns: name, branch, zone, frequency (2/3), lat, lng, address, contact_phone, email</span>
     </div>
     <div class="card"><table>
     <tr><th>Client</th><th>Zone</th><th>Freq/mo</th><th>Collected this month</th><th>Contact</th><th>Status</th><th></th></tr>
@@ -562,7 +587,7 @@ async function customers() {
       <td><b>${esc(r.name)}</b><br><span class="muted small">${esc(r.branch)} · ${esc(r.address)}</span></td>
       <td><span class="zone-tag">${esc(r.zone)}</span></td><td>${r.frequency}×</td>
       <td>${r.collected_this_month}/${r.frequency}</td>
-      <td class="muted small">${esc(r.contact_phone)}</td>
+      <td class="muted small">${esc(GLPhone.format(r.contact_phone))}${r.email ? '<br>' + esc(r.email) : ''}</td>
       <td>${r.is_active ? '<span class="pill collected">active</span>' : '<span class="pill canceled">inactive</span>'}</td>
       <td class="row" style="gap:6px;flex-wrap:nowrap"><button class="btn primary small" onclick="customer360(${r.id})">360</button><button class="btn ghost small" onclick='customerForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'>Edit</button></td>
     </tr>`).join('')}</table></div>`;
@@ -593,22 +618,39 @@ function customerForm(c = {}) {
     ${field('Latitude', `<input id="f-lat" type="number" step="any" value="${c.lat ?? 25.2}">`)}
     ${field('Longitude', `<input id="f-lng" type="number" step="any" value="${c.lng ?? 55.3}">`)}
     ${field('Address', `<input id="f-addr" value="${esc(c.address || '')}">`)}
-    ${field('Contact phone', `<input id="f-phone" value="${esc(c.contact_phone || '')}">`)}
+    ${field('Mobile number', GLPhone.html('f-phone', c.contact_phone))}
+    ${field('Email (sign-in codes are sent here)', `<input id="f-email" type="email" inputmode="email" autocomplete="off" value="${esc(c.email || '')}" placeholder="name@company.ae">`)}
     ${c.id ? field('Active', `<select id="f-active"><option value="1" ${c.is_active ? 'selected' : ''}>Yes</option><option value="0" ${!c.is_active ? 'selected' : ''}>No</option></select>`) : ''}
     <div class="row"><button class="btn primary full" onclick="saveCustomer(${c.id || 'null'})">Save</button></div>
-    <p id="m-err" class="err"></p>`);
+    <p id="m-err" class="err"></p><div id="m-dup"></div>`);
 }
-async function saveCustomer(id) {
+// A mobile number or email that is already in the CRM is never saved twice.
+// For a new customer the office can add it as another site of the existing customer instead.
+function duplicateBox(e, linkAction) {
+  const d = e.data && e.data.duplicate; if (!d) return '';
+  const open = d.type === 'customer' ? `closeModal();customer360(${d.id})` : `leadDetail(${d.id})`;
+  return `<div class="dupbox"><p>${esc(e.message)}</p><div class="row">
+    <button class="btn ghost small" onclick="${open}">Open ${d.type === 'customer' ? 'that customer' : 'that lead'}</button>
+    ${e.data.can_link && linkAction ? `<button class="btn primary small" onclick="${linkAction.replace('__ID__', d.id)}">Add as another site of ${esc(d.name)}</button>` : ''}</div></div>`;
+}
+async function saveCustomer(id, linkAccountId) {
+  $('#m-err').textContent = ''; $('#m-dup').innerHTML = '';
+  const ph = GLPhone.read('f-phone');
+  if (!ph.ok) { $('#m-err').textContent = ph.error; $('#f-phone').focus(); return; }
   const body = {
     name: $('#f-name').value, branch: $('#f-branch').value, zone: $('#f-zone').value,
     frequency: Number($('#f-freq').value), lat: Number($('#f-lat').value), lng: Number($('#f-lng').value),
-    address: $('#f-addr').value, contact_phone: $('#f-phone').value,
+    address: $('#f-addr').value, contact_phone: ph.e164, email: $('#f-email').value.trim(),
   };
+  if (linkAccountId) body.link_account_id = linkAccountId;
   if (id) body.is_active = $('#f-active').value === '1';
   try {
-    await api(id ? '/customers/' + id : '/customers', { method: id ? 'PUT' : 'POST', body });
-    closeModal(); toast('Customer saved'); nav('customers');
-  } catch (e) { $('#m-err').textContent = e.message; }
+    const r = await api(id ? '/customers/' + id : '/customers', { method: id ? 'PUT' : 'POST', body });
+    closeModal(); toast(r.linked_account ? 'Site added to the existing customer' : 'Customer saved', 'success'); nav('customers');
+  } catch (e) {
+    if (e.data && e.data.duplicate) $('#m-dup').innerHTML = duplicateBox(e, `saveCustomer(${id || 'null'}, __ID__)`);
+    else $('#m-err').textContent = e.message;
+  }
 }
 
 // USERS
@@ -625,7 +667,7 @@ async function users() {
     ${rows.map(r => `<tr>
       <td><b>${esc(r.full_name)}</b></td><td>${r.role === 'admin' ? (r.crm_role === 'ops' ? '<span class="role-chip">Ops staff</span>' : 'Owner / admin') : 'Driver'}</td>
       <td class="muted small">${r.role === 'admin' ? esc(r.username) : 'PIN ••••'}</td>
-      <td>${esc(r.fleet_number || '—')}</td><td class="muted small">${esc(r.phone)}</td>
+      <td>${esc(r.fleet_number || '—')}</td><td class="muted small">${esc(GLPhone.format(r.phone))}</td>
       <td>${r.is_active ? '<span class="pill collected">active</span>' : '<span class="pill canceled">disabled</span>'}</td>
       <td><button class="btn ghost small" onclick='userForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'>Edit</button></td>
     </tr>`).join('')}</table></div>`;
@@ -645,7 +687,7 @@ function userForm(u = {}) {
       ${field('Username', `<input id="u-username" value="${esc(u.username || '')}" ${u.id ? 'disabled' : ''}>`)}
       ${field(u.id ? 'New password (leave blank to keep)' : 'Password', `<input id="u-password" type="password">`)}
     </div>
-    ${field('Phone', `<input id="u-phone" value="${esc(u.phone || '')}">`)}
+    ${field('Mobile number', GLPhone.html('u-phone', u.phone))}
     ${u.id && u.role === 'admin' ? field('CRM role', `<select id="u-crm"><option value="owner" ${u.crm_role !== 'ops' ? 'selected' : ''}>Owner / admin — full control</option><option value="ops" ${u.crm_role === 'ops' ? 'selected' : ''}>Ops staff — leads, quotes, ledger, rescheduling</option></select>`) : ''}
     ${u.id ? field('Active', `<select id="u-active"><option value="1" ${u.is_active ? 'selected' : ''}>Yes</option><option value="0" ${!u.is_active ? 'selected' : ''}>No</option></select>`) : ''}
     <div class="row"><button class="btn primary full" onclick="saveUser(${u.id || 'null'}, '${u.role || ''}')">Save</button></div>
@@ -654,7 +696,9 @@ function userForm(u = {}) {
 async function saveUser(id, existingRole) {
   const picked = id ? existingRole : $('#u-role').value;
   const role = picked === 'ops' ? 'admin' : picked;
-  const body = { full_name: $('#u-name').value, role, phone: $('#u-phone').value };
+  const uph = GLPhone.read('u-phone');
+  if (!uph.ok) { $('#m-err').textContent = uph.error; return; }
+  const body = { full_name: $('#u-name').value, role, phone: uph.e164 };
   if (role === 'driver') {
     if ($('#u-pin').value) body.pin = $('#u-pin').value;
     body.vehicle_id = $('#u-veh').value ? Number($('#u-veh').value) : null;

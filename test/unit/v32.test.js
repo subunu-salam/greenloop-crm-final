@@ -72,17 +72,24 @@ const custTok = (id) => tok({ id, role: 'customer', customer_id: id, name: 'C' +
   rec('Push', 'Test push goes to the caller\'s own device only', r.body.delivered === 1 && webpush.sent.at(-1).endpoint.includes('drv0'), r.body.delivered);
 
   // ───────── QUOTATION → GMAIL ─────────
+  // v3.3: an email can only be sent after its preview was fetched; this does both, like the CRM does
+  const sendQ = async (id, body = {}) => {
+    const pv = await call('POST', `/quotations/${id}/preview`, { token: A, body });
+    if (pv.status !== 200) return pv;
+    return call('POST', `/quotations/${id}/send`, { token: A, body: { ...body, preview_token: pv.body.preview_token } });
+  };
+  let mkN = 0; // v3.3: a mobile number may be on only one lead, so every test lead gets its own
   const mk = async (email) => {
-    const l = await call('POST', '/leads', { token: A, body: { contact: 'Omar', company: 'Test Co', phone: '+971501112233', email, service_type: 'WASTE', source: 'website', sites: [{ name: 'HQ', zone: 'Deira', lat: 25.27, lng: 55.31 }] } });
+    const l = await call('POST', '/leads', { token: A, body: { contact: 'Omar', company: 'Test Co', phone: '+97150111' + String(2200 + (++mkN)), email, service_type: 'WASTE', source: 'website', sites: [{ name: 'HQ', zone: 'Deira', lat: 25.27, lng: 55.31 }] } });
     const qq = await call('POST', '/quotations', { token: A, body: { lead_id: l.body.id, items: [{ service_code: 'WASTE', qty: 8, unit_price: 100 }], plan: { recurrence: { type: 'weekly', days: [0, 3] }, time_window: '07:00-12:00', billing: 'monthly' } } });
     return { lead: l.body.id, quote: qq.body.id };
   };
   const noMail = await mk('');
-  r = await call('POST', `/quotations/${noMail.quote}/send`, { token: A, body: {} });
+  r = await sendQ(noMail.quote);
   rec('Quotation', 'Gmail is the default channel; a lead without email gets a clear error', r.status === 400 && r.body.code === 'NO_EMAIL', r.body.error);
   rec('Quotation', 'A failed send leaves the quotation as draft', q.get(`SELECT status FROM quotations WHERE id=?`, noMail.quote).status === 'draft', 'draft');
   const withMail = await mk('omar@testco.ae');
-  r = await call('POST', `/quotations/${withMail.quote}/send`, { token: A, body: { base_url: 'https://app.greenloop.ae' } });
+  r = await sendQ(withMail.quote, { base_url: 'https://app.greenloop.ae' });
   rec('Quotation', 'Without server Gmail credentials a pre-filled Gmail compose link is returned', r.status === 200 && r.body.delivery === 'compose' && r.body.gmail_compose_url.startsWith('https://mail.google.com/mail/?') && r.body.gmail_compose_url.includes('omar%40testco.ae'), r.body.delivery);
   let row = q.get(`SELECT status, sent_via, sent_to FROM quotations WHERE id=?`, withMail.quote);
   rec('Quotation', 'Quotation logged as sent via gmail to the lead\'s address', row.status === 'sent' && row.sent_via === 'gmail' && row.sent_to === 'omar@testco.ae', JSON.stringify(row));
@@ -91,12 +98,12 @@ const custTok = (id) => tok({ id, role: 'customer', customer_id: id, name: 'C' +
   process.env.GMAIL_USER = 'sales@greenloop.ae'; process.env.GMAIL_APP_PASSWORD = 'abcd efgh ijkl mnop';
   mailer.send = async (m) => { outbox.push(m); return { ok: true }; };
   const m2 = await mk('buyer@shop.ae');
-  r = await call('POST', `/quotations/${m2.quote}/send`, { token: A, body: { base_url: 'https://app.greenloop.ae' } });
+  r = await sendQ(m2.quote, { base_url: 'https://app.greenloop.ae' });
   rec('Quotation', 'With Gmail connected the email is sent by the server', r.body.delivery === 'sent' && outbox.length === 1 && outbox[0].to === 'buyer@shop.ae', r.body.delivery);
   rec('Quotation', 'Email has the accept / PDF link, total and DD/MM/YYYY validity', outbox[0].html.includes('https://app.greenloop.ae/q/') && outbox[0].subject.includes('AED 840.00') && /valid until \d{2}\/\d{2}\/\d{4}/.test(outbox[0].text), outbox[0].subject);
   mailer.send = async () => { const e = new Error('Gmail refused the message: quota'); e.status = 502; throw e; };
   const m3 = await mk('fail@shop.ae');
-  r = await call('POST', `/quotations/${m3.quote}/send`, { token: A, body: {} });
+  r = await sendQ(m3.quote);
   rec('Quotation', 'If Gmail rejects the email nothing is marked sent and a manual link is offered', r.status === 502 && q.get(`SELECT status FROM quotations WHERE id=?`, m3.quote).status === 'draft' && !!r.body.gmail_compose_url, r.body.error);
   const mime = mailer.buildMime({ to: 'a@b.ae', subject: 'Hello\r\nBcc: evil@x.com', text: 'x' });
   rec('Security', 'Email subject cannot inject extra headers', !/^Bcc:/m.test(mime), 'no Bcc header');

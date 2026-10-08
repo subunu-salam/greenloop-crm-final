@@ -18,14 +18,14 @@
     <div class="login-title">GreenLoop</div>
     <div class="login-sub">Your visits, photo proof, plans and invoices</div>
   </div>
-  <div class="seg"><button id="lm-code" class="on" onclick="loginMode('code')">Store code</button><button id="lm-otp" onclick="loginMode('otp')">Phone / email</button></div>
+  <div class="seg"><button id="lm-code" class="on" onclick="loginMode('code')">Mobile and code</button><button id="lm-otp" onclick="loginMode('otp')">Email me a code</button></div>
   <div id="login-code" class="login-panel">
     <div class="glass form" style="margin-bottom:14px">
       <label for="login-phone">Mobile number on your account</label>
-      <input id="login-phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="050 123 4567">
+      <div id="login-phone-slot"></div>
     </div>
-    <p class="hint">Then enter your store code</p>
-    <div class="pin-dots" id="pin-dots"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <p class="hint">Then enter your 4-digit code</p>
+    <div class="pin-dots" id="pin-dots"><i></i><i></i><i></i><i></i></div>
     <div class="pad">
       <button onclick="pinKey(1)">1</button><button onclick="pinKey(2)">2</button><button onclick="pinKey(3)">3</button>
       <button onclick="pinKey(4)">4</button><button onclick="pinKey(5)">5</button><button onclick="pinKey(6)">6</button>
@@ -33,16 +33,23 @@
       <button class="pad-ghost" aria-hidden="true"></button><button onclick="pinKey(0)">0</button>
       <button class="pad-del" onclick="pinDel()" aria-label="Delete">⌫</button>
     </div>
-    <button class="btn primary full" id="code-go" onclick="doLogin()" disabled>Sign in</button>
-    <p class="demo">Demo: mobile <b>050 000 1001</b> + code <b>1001</b> (also …1002, …1003)</p>
+    <p class="demo">Demo: <b>+971 50 000 1001</b> with code <b>1001</b> (also …1002, …1003)</p>
   </div>
   <div id="login-otp" class="login-panel hidden">
     <div class="glass form">
-      <label for="otp-id">Mobile number or email on your account</label>
-      <input id="otp-id" inputmode="email" autocomplete="username" placeholder="+971 50 123 4567">
-      <button class="btn primary" onclick="otpRequest()">Send one-time code</button>
+      <div id="otp-by-phone">
+        <label for="otp-phone">Mobile number on your account</label>
+        <div id="otp-phone-slot"></div>
+        <p class="hint" style="margin:8px 0 0;text-align:left">We email a 6-digit code to the address saved on your account.</p>
+      </div>
+      <div id="otp-by-email" class="hidden">
+        <label for="otp-email">Email on your account</label>
+        <input id="otp-email" type="email" inputmode="email" autocomplete="email" placeholder="name@company.ae">
+      </div>
+      <button class="linkbtn" type="button" id="otp-switch" onclick="otpBy()">Use my email address instead</button>
+      <button class="btn primary" onclick="otpRequest()">Email me a code</button>
       <div id="otp-step2" class="hidden">
-        <label for="otp-code">6-digit code</label>
+        <label for="otp-code">6-digit code from the email</label>
         <input id="otp-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="••••••">
         <button class="btn primary" onclick="otpVerify()">Sign in</button>
         <p id="otp-dev" class="demo"></p>
@@ -81,6 +88,7 @@
 </div>
 <div id="toasts" class="toasts" aria-live="polite"></div>
 <script src="/socket.io/socket.io.js"></script>
+<script src="/shared/phone.js"></script>
 <script src="fx.js"></script>
 <script src="app.js"></script>
 <script src="pwa-setup.js"></script>

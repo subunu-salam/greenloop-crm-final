@@ -194,3 +194,39 @@ Requirements that have not changed: HTTPS in production; on iPhone the app must 
 
 ### Not changed in this build
 `crm-react/` (the experimental CRM v2) and `mobile-expo/` (native driver app) do not have the new screens yet.
+
+---
+
+## v3.3 — unique contacts, frequency pricing, quotation preview, driver shift clock
+
+### What changed for users
+- **One phone format everywhere** (CRM and customer app): a country-code list (+971 UAE / Dubai, +966, +974, +968, +965, +973) and the local number, the same as the DevX Nexus sign-in. Numbers are stored as `+971501234567`.
+- **No duplicate contacts.** A mobile number or email that is already on a lead or a customer cannot be saved again. The CRM names the existing record and offers to open it. For a new customer it can add the entry as another site of the existing customer instead.
+- **Quotations are priced by frequency.** Each line is "N times a day / week / month". Visits a month and the amount are worked out by the server: daily = N × 30, weekly = N × 52 ÷ 12 rounded (3 a week = 13), monthly = N. The typed "Visits" box is gone. On registration every service is scheduled by its own frequency.
+- **Preview before sending.** A quotation email can only be sent after its preview has been opened: recipient, subject, the email body and the quotation page it links to, followed by a confirmation. The server refuses a send without a preview, and refuses it if the quotation or recipient changed after the preview.
+- **Quotation screens redesigned**: the quotation opens as the actual document the customer receives; the list is one row per quotation; the document and email use a plain letterhead layout.
+- **Driver app: shift clock.** Clock in → Start job (navigation) → Arrive (one GPS-stamped photo) → Finish or Report issue. The arrival photo is the proof for the stop, so there is no second photo. A shift timer and per-job timers run in the app; the office sees clock-in/out, drive time and time on site in the Daily Route Ledger.
+- **4-digit customer app code** (was 6). The code signs in as soon as the fourth digit is typed. Codes issued earlier still work on the server; reset them from Customer 360 to give the customer a 4-digit one.
+- **One-time sign-in codes are emailed through Gmail** (free). A customer who types their mobile number receives the code at the email saved on their account. If the account has no email, the office gets an alert.
+
+### Settings
+| Variable | Default | Purpose |
+|---|---|---|
+| `OTP_DEV` | on until Gmail is connected | Shows the one-time code on screen (demo). Set `0` in production; `1` forces it on. |
+| `GMAIL_USER` + `GMAIL_APP_PASSWORD` | — | Now also used for one-time codes and welcome emails, not only quotations. |
+
+No new npm packages. New tables and columns are created on start; existing data is kept.
+
+### New / changed API
+`GET /contacts/check` · `GET /pricing/frequency` · `POST /quotations/:id/preview` · `POST /quotations/:id/send` now needs `preview_token` for Gmail ·
+`GET /driver/shift` · `POST /driver/shift/clock-in|clock-out` · `POST /pickups/:id/arrive-proof` (multipart) · `POST /pickups/:id/finish` · `POST /pickups/:id/issue` · `GET /shifts?date=`
+`POST /pickups/:id/complete` and `/cancel` are unchanged and still used by the native app.
+
+### Testing on phones
+Camera, GPS and notifications only work over HTTPS (or `localhost`). Test the driver and customer apps on real phones against the deployed HTTPS address, not `http://<laptop-ip>:3000`.
+
+### Tests
+`npm test` now runs four suites: the regression walk-through plus 220 individual checks (edge cases 50, v3.2 78, v3.3 92).
+
+### Not changed in this build
+`mobile-expo/` (native driver app) and `crm-react/` still use the older screens. There is no SMS provider: one-time codes go by email only.

@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────
 // GreenLoop Driver v2 — proper app shell
 // Tabs: Route · History · Account | Notification centre with chime
-// Per-order progress: Accepted → In progress → Photo uploaded → Completed
+// Per-stop flow (v3.3): Clock in → Start job → Arrive (one GPS-stamped photo) → Finish or report an issue
 // Zero text inputs · silent GPS + timestamp · offline queue (60 s retry)
 // ─────────────────────────────────────────────────────────────
 const API = '/api/v1';
@@ -140,6 +140,7 @@ function logout() {
   try { if (window.GLPush) window.GLPush.signOut(); } catch {}
   localStorage.removeItem('gl_drv_token'); localStorage.removeItem('gl_drv_user');
   token = null; driver = null;
+  try { shift = null; localStorage.removeItem('gl_drv_shift'); } catch {}
   $('#s-app').classList.add('hidden');
   $('#s-login').classList.remove('hidden');
 }
@@ -176,7 +177,7 @@ async function enterApp() {
   $('#hdr-greet').textContent = `${greeting()}, ${driver.name.split(' ')[0]}`;
   $('#hdr-date').textContent = fmtDate(new Date());
   renderBellBadge();
-  await loadJobs();
+  await Promise.all([loadJobs(), typeof loadShift === 'function' ? loadShift() : null]);
   switchTab('home');
   connectSocket();
 }
@@ -219,7 +220,7 @@ function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
   ['home', 'history', 'vehicle', 'account'].forEach(v => $('#v-' + v).classList.toggle('hidden', v !== tab));
   if (tab === 'vehicle') renderVehicle();
-  if (tab === 'home') { loadJobs().then(renderHome); renderHome(); }
+  if (tab === 'home') { Promise.all([loadJobs(), typeof loadShift === 'function' ? loadShift() : null]).then(renderHome); renderHome(); }
   if (tab === 'history') renderHistory();
   if (tab === 'account') renderAccount();
 }
@@ -274,9 +275,33 @@ async function loadJobs() {
     const data = await res.json();
     jobs = data.jobs;
     clockOffsetMs = Date.parse(data.server_now) - Date.now();
-    localStorage.setItem('gl_drv_jobs', JSON.stringify(jobs));
   } catch { jobs = jobs.length ? jobs : JSON.parse(localStorage.getItem('gl_drv_jobs') || '[]'); }
+  applyQueue();
+  saveJobs();
 }
+function saveJobs() { try { localStorage.setItem('gl_drv_jobs', JSON.stringify(jobs.map(j => ({ ...j, arrival_local: undefined })))); } catch { /* storage full: the server copy is the record */ } }
+// Steps saved offline have not reached the server yet; show them as done on this phone.
+function applyQueue() {
+  for (const p of getQueue()) {
+    const j = jobs.find(x => x.id === p.pickupId); if (!j) continue;
+    if (p.kind === 'arrive' && !j.arrived_at) { j.arrived_at = p.photo_taken_at; j.started_at = j.started_at || p.photo_taken_at; j.arrival_local = p.photo; j.pending_sync = true; }
+    if (p.kind === 'finish') { j.status = 'collected'; j.stage = 'completed'; j.pending_sync = true; }
+    if (p.kind === 'issue') { j.status = 'canceled'; j.confirmation_status = 'awaiting'; j.pending_sync = true; }
+  }
+}
+const serverNow = () => Date.now() + clockOffsetMs;
+// 754 → "12:34", 4000 → "1:06:40"
+function fmtDur(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = sec % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : String(m).padStart(2, '0')) + ':' + String(x).padStart(2, '0');
+}
+const hhmm = iso => { const d = new Date(iso); return isNaN(d) ? '' : String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+// every element with data-since="<ISO time>" is a running timer
+setInterval(() => {
+  document.querySelectorAll('[data-since]').forEach(el => { const t0 = Date.parse(el.dataset.since); if (isFinite(t0)) el.textContent = fmtDur((serverNow() - t0) / 1000); });
+}, 1000);
+const timer = iso => `<b class="tmr" data-since="${esc(iso)}">${fmtDur((serverNow() - Date.parse(iso)) / 1000)}</b>`;
 
 // time-window countdown (DRV-11)
 function windowState(j) {
@@ -298,14 +323,15 @@ function windowChip(j) {
   return `<span class="win ${w.cls}">${svg(IC.clock, 12)} ${esc(j.time_window)} · ${w.text}</span>`;
 }
 
-// order stage model: pending=0 · acknowledged/arrived=1 · sending=2 · collected=4 · canceled=ended
+// stop model: 0 not started · 1 started, on the way · 2 arrived (GPS photo accepted) · 3 sending · 4 finished · -1 issue reported
 function jobSteps(j) {
   if (j.status === 'collected') return 4;
   if (j.status === 'canceled') return -1;
-  if (j.stage === 'acknowledged' || j.stage === 'arrived') return 1;
+  if (j.arrived_at) return 2;
+  if (j.started_at || j.stage === 'acknowledged' || j.stage === 'arrived') return 1;
   return 0;
 }
-const stepLabels = () => [t('sAccepted'), t('sInProgress'), t('sPhoto'), t('sDone')];
+const stepLabels = () => [t('sStart'), t('sArrive'), t('sReport'), t('sDone')];
 
 function ministeps(j) {
   const s = jobSteps(j);
@@ -317,7 +343,8 @@ function chip(j) {
   if (j.status === 'collected') return `<span class="chip collected">${svg(IC.check, 11)} Done</span>`;
   if (j.status === 'canceled') return `<span class="chip canceled">${svg(IC.x, 11)} ${j.confirmation_status === 'awaiting' ? 'Awaiting' : 'No pickup'}</span>`;
   if (j.status === 'overdue') return `<span class="chip overdue">${svg(IC.clock, 11)} Overdue</span>`;
-  if (j.stage === 'acknowledged' || j.stage === 'arrived') return `<span class="chip progress">${svg(IC.play, 11)} Active</span>`;
+  if (jobSteps(j) === 2) return `<span class="chip progress">${svg(IC.pin, 11)} ${t('onSite')}</span>`;
+  if (jobSteps(j) === 1) return `<span class="chip progress">${svg(IC.nav, 11)} ${t('onWay')}</span>`;
   return `<span class="chip pending">${svg(IC.clock, 11)} Waiting</span>`;
 }
 const catPill = j => `<span class="cat ${j.category || 'waste'}">${svg(j.category === 'pest' ? IC.bug : IC.truck, 11)} ${esc(j.service_name || j.service_type || 'Waste')}</span>`;
@@ -327,6 +354,7 @@ function renderHome() {
   const pct = jobs.length ? Math.round(100 * done / jobs.length) : 0;
   const risk = jobs.filter(j => (windowState(j) || {}).cls === 'risk' && jobSteps(j) === 0).length;
   $('#v-home').innerHTML = `
+    ${typeof shiftCard === 'function' ? shiftCard() : ''}
     <div class="sumcard">
       <div class="sumtop"><span class="sumtitle">${svg(IC.calendar, 16)} ${t('today')}</span>
       <span class="sumcount">${done} / ${jobs.length} ${t('done')}</span></div>
@@ -348,7 +376,7 @@ function renderHome() {
       </button>`;
     }).join('') || `<div class="empty">${t('none')}</div>`}`;
 }
-setInterval(() => { if (activeTab === 'home' && token && $('#s-job').classList.contains('hidden') && $('#s-cam').classList.contains('hidden')) renderHome(); }, 30_000);
+setInterval(() => { if (activeTab === 'home' && token && $('#s-job').classList.contains('hidden') && $('#s-cam').classList.contains('hidden') && !document.querySelector('.sheet-wrap')) renderHome(); }, 30_000);
 
 // ── JOB DETAIL ───────────────────────────────────────────────
 let checks = {};
@@ -377,7 +405,8 @@ function renderJobDetail(forceStep) {
   const s = forceStep !== undefined ? forceStep : jobSteps(j);
   const help = t('stepHelp');
   $('#stepper').innerHTML = stepLabels().map((lbl, i) => {
-    const done = i < s, active = i === s;
+    // steps: 0 start · 1 arrive · 2 report · 3 done.  "sending" (s = 3) stays on Report.
+    const done = s === 4 || i < Math.min(s, 2), active = s < 4 && i === Math.min(s, 2);
     return `<div class="step ${done ? 'done' : ''} ${active ? 'active' : ''}">
       <div class="rail"><div class="bub">${done ? svg(IC.check, 15) : i + 1}</div><div class="vline"></div></div>
       <div class="stext"><div class="stitle">${lbl}</div><div class="ssub">${help[i]}</div></div></div>`;
@@ -387,44 +416,79 @@ function renderJobDetail(forceStep) {
   const needChecks = list.length && j.category === 'pest';
   const allTicked = list.every((_, i) => checks[i]);
   if (s === 0) {
-    A.innerHTML = `<button class="giant teal" onclick="ackJob()">${svg(IC.play)}<span>${t('start')}</span></button>`;
+    // a job can only start inside a shift
+    A.innerHTML = (typeof onShift === 'function' && !onShift())
+      ? `<p class="flow-hint">${svg(IC.clock, 16)} ${t('clockInFirst')}</p><button class="giant teal" onclick="clockIn()">${svg(IC.clock)}<span>${t('clockIn')}</span></button>`
+      : `<button class="giant teal" onclick="ackJob()">${svg(IC.play)}<span>${t('start')}</span></button>`;
   } else if (s === 1) {
     A.innerHTML = `
-      ${j.stage !== 'arrived' ? `<button class="wide-btn" onclick="arrive()">${svg(IC.flag, 18)} ${t('arrived')}</button>` : ''}
+      <div class="jobtimer">${svg(IC.nav, 18)}<span>${t('onWay')}</span>${j.started_at ? timer(j.started_at) : ''}</div>
+      ${j.maps_url ? `<a class="giant blue" href="${esc(j.maps_url)}" target="_blank" rel="noopener">${svg(IC.nav)}<span>${t('navigate').toUpperCase()}</span></a>` : ''}
+      <button class="giant green" onclick="openCamera('arrive')">${svg(IC.camera)}<span>${t('arrivePhoto')}</span><small>${t('arriveSub')}</small></button>`;
+  } else if (s === 2) {
+    const pic = j.arrival_local || j.arrival_photo_url;
+    A.innerHTML = `
+      <div class="arrival">${pic ? `<img src="${esc(pic)}" alt="">` : ''}
+        <div><b>${svg(IC.checkCircle, 16)} ${t('arrivedAt')} ${hhmm(j.arrived_at)}</b>
+          <span>${j.arrival_distance_m != null ? `${j.arrival_distance_m} ${t('fromSite')}` : ''}${j.pending_sync ? ` ${t('savedOffline')}` : ''}</span>
+          <span class="jobtimer inline">${t('onSite')} ${timer(j.arrived_at)}</span></div></div>
       ${list.length ? `<div class="checklist"><div class="cl-head">${svg(IC.check, 15)} ${t('checklist')}${needChecks ? '' : ' <small>(optional)</small>'}</div>
         ${list.map((c, i) => `<button class="cl-item ${checks[i] ? 'on' : ''}" onclick="toggleCheck(${i})"><span class="box">${checks[i] ? svg(IC.check, 16) : ''}</span>${esc(c)}</button>`).join('')}</div>` : ''}
-      <button class="giant green" ${needChecks && !allTicked ? 'disabled' : ''} onclick="openCamera('complete')">${needChecks && !allTicked ? svg(IC.lock) : svg(IC.camera)}<span>${t('photo')}</span></button>
-      <button class="giant red" onclick="showReasons()">${svg(IC.ban)}<span>${t('nopick')}</span></button>`;
-  } else if (s === 2) {
-    A.innerHTML = `<button class="giant teal" disabled>${svg(IC.upload)}<span>SENDING…</span></button>`;
+      <button class="giant green" ${needChecks && !allTicked ? 'disabled' : ''} onclick="finishJob()">${needChecks && !allTicked ? svg(IC.lock) : svg(IC.checkCircle)}<span>${t('finish')}</span></button>
+      <button class="giant red" onclick="showReasons()">${svg(IC.ban)}<span>${t('issue')}</span></button>`;
+  } else if (s === 3) {
+    A.innerHTML = `<button class="giant teal" disabled>${svg(IC.upload)}<span>${t('sending')}</span></button>`;
   } else A.innerHTML = '';
 }
 function toggleCheck(i) { checks[i] = !checks[i]; renderJobDetail(); }
 
+// STEP 1 · Start job: the job timer starts, the customer is told the driver is on the way
 async function ackJob() {
   if (!currentJob) return;
+  if (typeof onShift === 'function' && !onShift()) return glToast(t('clockInFirst'), 'error');
   currentJob.stage = 'acknowledged';
+  currentJob.started_at = new Date(serverNow()).toISOString();
+  saveJobs();
   renderJobDetail();
-  try { await fetch(`${API}/pickups/${currentJob.id}/ack`, { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch { /* offline */ }
-}
-async function arrive() {
-  if (!currentJob) return;
-  currentJob.stage = 'arrived';
-  renderJobDetail();
-  try { await fetch(`${API}/pickups/${currentJob.id}/arrive`, { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch {}
+  try { await fetch(`${API}/pickups/${currentJob.id}/ack`, { method: 'POST', headers: { Authorization: 'Bearer ' + token } }); } catch { /* offline: the arrival photo also starts the job on the server */ }
 }
 
-// ── NOT PICKED UP ────────────────────────────────────────────
-let npuReason = null;
+// STEP 3 · Report: finished. Uses the arrival photo as the proof, so no second photo.
+async function finishJob() {
+  const j = currentJob; if (!j) return;
+  const checklist = (j.checklist || []).filter((_, i) => checks[i]);
+  renderJobDetail(3);
+  const r = await sendOrQueue({ kind: 'finish', pickupId: j.id, checklist });
+  if (r.status === 'rejected') { renderJobDetail(); return flashMsg(false, t('notSent'), r.problems.join('\n'), false); }
+  j.status = 'collected'; j.stage = 'completed'; j.completed_at = new Date(serverNow()).toISOString();
+  saveJobs();
+  renderJobDetail(4);
+  if (typeof loadShift === 'function') loadShift();   // refreshes the time-on-jobs total
+  pushNotif('ok', 'Job completed', `${j.name} — ${r.status === 'ok' ? 'sent to office' : 'saved, will send automatically'}`, true);
+  flashMsg(true, r.status === 'ok' ? t('completed') : t('saved'));
+}
+
+// STEP 3 · Report: an issue. Reason only; the arrival photo already shows the site.
 function showReasons() {
   $('#reasons-body').innerHTML = ['CLOSED', 'NO_ACCESS', 'NO_WASTE', 'CUSTOMER_REFUSED'].map(r =>
-    `<button class="reason" onclick="pickReason('${r}')">${svg(IC.ban, 26)}<span>${t(r)}</span></button>`).join('') +
-    `<p class="reason-note">${svg(IC.camera, 14)} A live photo of the site is required. The customer is asked to confirm within 24 h.</p>`;
+    `<button class="reason" onclick="reportIssue('${r}')">${svg(IC.ban, 26)}<span>${t(r)}</span></button>`).join('') +
+    `<p class="reason-note">${svg(IC.camera, 14)} ${t('usesArrival')}</p>`;
   $('#reasons-title').textContent = t('why');
   $('#s-reasons').classList.remove('hidden');
 }
 function hideReasons() { $('#s-reasons').classList.add('hidden'); }
-function pickReason(r) { npuReason = r; hideReasons(); openCamera('npu'); }
+async function reportIssue(reason) {
+  const j = currentJob; if (!j) return;
+  hideReasons();
+  renderJobDetail(3);
+  const r = await sendOrQueue({ kind: 'issue', pickupId: j.id, reason });
+  if (r.status === 'rejected') { renderJobDetail(); return flashMsg(false, t('notSent'), r.problems.join('\n'), false); }
+  j.status = 'canceled'; j.confirmation_status = 'awaiting';
+  saveJobs();
+  if (typeof loadShift === 'function') loadShift();
+  pushNotif('bad', 'Issue reported', `${j.name} — ${t(reason)}`, true);
+  flashMsg(false, r.status === 'ok' ? t('reported') : t('saved'));
+}
 
 // ── LIVE CAMERA + ON-DEVICE STAMP (DRV-06) ───────────────────
 // No file input / gallery: getUserMedia only. Each frame is stamped with
@@ -435,7 +499,7 @@ async function openCamera(mode) {
   $('#s-cam').classList.remove('hidden');
   $('#cam-review').classList.add('hidden');
   $('#cam-live').classList.remove('hidden');
-  $('#cam-title').textContent = mode === 'npu' ? `${t('nopick')} · ${t(npuReason)}` : t('photo');
+  $('#cam-title').textContent = t('camArrive');
   updateCamStatus();
   if (navigator.geolocation) {
     cam.watch = navigator.geolocation.watchPosition(p => { cam.fix = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) }; updateCamStatus(); },
@@ -472,7 +536,7 @@ function capture() {
   const now = new Date();
   const when = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
   const lines = [`${j.name}${j.branch ? ' — ' + j.branch : ''}`, `${when}  ·  GPS ${f.lat.toFixed(6)}, ${f.lng.toFixed(6)} (±${f.acc} m)`,
-    `GreenLoop · ${cam.mode === 'npu' ? 'NOT PICKED UP: ' + npuReason.replace(/_/g, ' ') : (j.service_name || 'Service') + ' completed'} · job #${j.id}`];
+    `GreenLoop · Arrived on site · ${j.service_name || 'Service'} · job #${j.id}`];
   const fs = Math.max(16, Math.round(W / 42)), band = fs * 1.55 * lines.length + fs;
   g.fillStyle = 'rgba(4,34,29,.72)'; g.fillRect(0, H - band, W, band);
   g.fillStyle = '#2dd4bf'; g.fillRect(0, H - band, 6, band);
@@ -484,31 +548,26 @@ function capture() {
   $('#cam-review').classList.remove('hidden');
 }
 function retake() { cam.shot = null; $('#cam-review').classList.add('hidden'); $('#cam-live').classList.remove('hidden'); }
+// STEP 2 · Arrival: the GPS-stamped photo goes to the office, which checks it against the site.
 async function usePhoto() {
-  const shot = cam.shot, j = currentJob, mode = cam.mode;
+  const shot = cam.shot, j = currentJob;
   if (!shot || !j) return;
   closeCamera();
-  renderJobDetail(2);
-  const checklist = (j.checklist || []).filter((_, i) => checks[i]);
-  const payload = mode === 'npu'
-    ? { kind: 'cancel', pickupId: j.id, reason: npuReason, ...shot }
-    : { kind: 'complete', pickupId: j.id, checklist, ...shot };
-  const r = await sendOrQueue(payload);
+  renderJobDetail(3);
+  const r = await sendOrQueue({ kind: 'arrive', pickupId: j.id, ...shot });
   if (r.status === 'rejected') {
-    renderJobDetail(1);
+    renderJobDetail();
     pushNotif('bad', 'Photo rejected', `${j.name}: ${r.problems.join('; ')}. Office notified — retake at the site.`);
     return flashMsg(false, t('rejected'), r.problems.join('\n'), false);
   }
-  if (mode === 'npu') {
-    j.status = 'canceled'; j.confirmation_status = 'awaiting';
-    pushNotif('bad', 'Not picked up reported', `${j.name} — ${t(npuReason)}`);
-    flashMsg(false, r.status === 'ok' ? t('reported') : t('saved'));
-  } else {
-    j.status = 'collected'; j.stage = 'completed';
-    renderJobDetail(4);
-    pushNotif('ok', 'Job completed', `${j.name} — ${r.status === 'ok' ? 'sent to office' : 'saved, will send automatically'}`);
-    flashMsg(true, r.status === 'ok' ? t('completed') : t('saved'));
-  }
+  j.stage = 'arrived';
+  j.arrived_at = shot.photo_taken_at; j.started_at = j.started_at || shot.photo_taken_at;
+  j.arrival_local = shot.photo;
+  if (r.data && r.data.distance_m != null) j.arrival_distance_m = r.data.distance_m;
+  if (r.status === 'queued') j.pending_sync = true;
+  saveJobs();
+  renderJobDetail();
+  glToast(r.status === 'ok' ? t('arrivalSaved') : t('saved'), 'success');
 }
 
 function flashMsg(good, msg, detail = '', close = true) {
@@ -600,26 +659,38 @@ function dataUrlToBlob(u) {
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
 }
-// returns {status:'ok'} | {status:'rejected', problems} ; throws on network/5xx (→ queue)
+// One step of a stop, sent to the office.
+//   arrive  the GPS-stamped photo (multipart)      finish / issue  the report (JSON)
+//   clockin / clockout  the shift                  complete / cancel  steps queued by an older app version
+// returns {status:'ok', data} | {status:'rejected', problems} ; throws on network/5xx (→ stays queued)
 async function transmit(p, queued = false) {
-  const fd = new FormData();
-  fd.append('photo', dataUrlToBlob(p.photo), 'proof.jpg');
-  fd.append('lat', p.lat ?? ''); fd.append('lng', p.lng ?? '');
-  fd.append('photo_taken_at', p.photo_taken_at);
-  fd.append('device_now', new Date().toISOString()); // checked against server clock (±5 min)
-  fd.append('stamped', '1'); fd.append('stamp_text', p.stamp_text || ''); fd.append('source', 'camera');
-  if (queued) fd.append('queued', '1');   // sent later from the offline queue → office reviews instead of rejecting
-  if (p.kind === 'complete') fd.append('checklist', JSON.stringify(p.checklist || []));
-  else fd.append('reason', p.reason);
-  const res = await fetch(`${API}/pickups/${p.pickupId}/${p.kind === 'complete' ? 'complete' : 'cancel'}`, {
-    method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd,
-  });
-  if (res.ok || res.status === 409) return { status: 'ok' };
-  if (res.status === 429) throw new Error('rate limited');   // keep it queued, retry later
-  if (res.status === 422 || res.status === 400 || res.status === 403 || res.status === 404) {
-    const b = await res.json().catch(() => ({}));
-    return { status: 'rejected', problems: b.problems || [b.error || 'Rejected by server'] };
+  const headers = { Authorization: 'Bearer ' + token };
+  let url, body;
+  if (p.kind === 'clockin' || p.kind === 'clockout') {
+    url = `${API}/driver/shift/${p.kind === 'clockin' ? 'clock-in' : 'clock-out'}`;
+    headers['Content-Type'] = 'application/json'; body = JSON.stringify({ lat: p.lat, lng: p.lng });
+  } else if (p.kind === 'finish' || p.kind === 'issue') {
+    url = `${API}/pickups/${p.pickupId}/${p.kind}`;
+    headers['Content-Type'] = 'application/json'; body = JSON.stringify(p.kind === 'finish' ? { checklist: p.checklist || [] } : { reason: p.reason });
+  } else {
+    const fd = new FormData();
+    fd.append('photo', dataUrlToBlob(p.photo), 'proof.jpg');
+    fd.append('lat', p.lat ?? ''); fd.append('lng', p.lng ?? '');
+    fd.append('photo_taken_at', p.photo_taken_at);
+    fd.append('device_now', new Date().toISOString()); // checked against server clock (±5 min)
+    fd.append('stamped', '1'); fd.append('stamp_text', p.stamp_text || ''); fd.append('source', 'camera');
+    if (queued) fd.append('queued', '1');   // sent later from the offline queue → office reviews instead of rejecting
+    if (p.kind === 'complete') fd.append('checklist', JSON.stringify(p.checklist || []));
+    if (p.kind === 'cancel') fd.append('reason', p.reason);
+    url = `${API}/pickups/${p.pickupId}/${p.kind === 'arrive' ? 'arrive-proof' : p.kind === 'complete' ? 'complete' : 'cancel'}`;
+    body = fd;
   }
+  const res = await fetch(url, { method: 'POST', headers, body });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok) return { status: 'ok', data };
+  if (res.status === 409 && data.code !== 'NOT_ARRIVED') return { status: 'ok', data };   // already done on the server
+  if (res.status === 429) throw new Error('rate limited');   // keep it queued, retry later
+  if ([400, 403, 404, 409, 422].includes(res.status)) return { status: 'rejected', problems: data.problems || [data.error || 'Rejected by server'] };
   throw new Error('HTTP ' + res.status);
 }
 
@@ -630,21 +701,33 @@ function setQueue(q) {
   $('#sync-count').textContent = q.length;
 }
 async function sendOrQueue(payload) {
+  // steps of one stop must reach the office in order: wait behind anything already queued for it
+  if (payload.pickupId && getQueue().some(x => x.pickupId === payload.pickupId)) { setQueue([...getQueue(), payload]); return { status: 'queued' }; }
   try { return await transmit(payload); }
   catch { setQueue([...getQueue(), payload]); return { status: 'queued' }; }
 }
+let flushing = false;
 async function flushQueue() {
   const q = getQueue();
-  if (!q.length || !token) return;
-  const remaining = [];
-  for (const p of q) {
-    try {
-      const r = await transmit(p, true);
-      if (r.status === 'rejected') pushNotif('bad', 'Saved photo rejected', `Job #${p.pickupId}: ${r.problems.join('; ')}`);
-    } catch { remaining.push(p); }
-  }
+  if (!q.length || !token || flushing) return;
+  flushing = true;
+  const remaining = [], held = new Set(), failed = new Set();
+  try {
+    for (const p of q) {
+      const key = p.pickupId || p.kind;
+      if (held.has(key)) { remaining.push(p); continue; }      // an earlier step of this stop is still waiting
+      if (failed.has(key)) continue;                           // its arrival photo was rejected: the report cannot stand
+      try {
+        const r = await transmit(p, true);
+        if (r.status === 'rejected') {
+          failed.add(key);
+          if (p.pickupId) pushNotif('bad', 'Saved step rejected', `Job #${p.pickupId}: ${r.problems.join('; ')}`);
+        }
+      } catch { remaining.push(p); held.add(key); }
+    }
+  } finally { flushing = false; }
   setQueue(remaining);
-  if (!remaining.length && q.length) pushNotif('ok', 'Back online', 'All saved jobs were sent to the office.');
+  if (!remaining.length && q.length) { pushNotif('ok', 'Back online', 'Everything saved on this phone was sent to the office.'); if (token) loadJobs().then(() => { if (activeTab === 'home') renderHome(); }); }
 }
 setInterval(flushQueue, 60_000);
 window.addEventListener('online', () => { $('#hdr-live')?.classList.remove('off'); flushQueue(); });
