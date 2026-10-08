@@ -2,7 +2,11 @@
 // Database entry — SQLite (local) or Neon Postgres (DATABASE_URL)
 // ─────────────────────────────────────────────────────────────
 if (process.env.DATABASE_URL) {
-  module.exports = require('./db-pg');
+  // v3 features (quotations, plans, billing, proof checks) are SQLite-only.
+  console.error('\n✖ DATABASE_URL is set, but GreenLoop v3 runs on SQLite only.\n' +
+    '  Remove the DATABASE_URL environment variable and set DB_PATH to a file on a\n' +
+    '  persistent disk (e.g. /var/data/greenloop.sqlite). See render.yaml.\n');
+  process.exit(1);
 } else {
   // Original SQLite implementation for local demo
   const { DatabaseSync } = require('node:sqlite');
@@ -13,6 +17,11 @@ if (process.env.DATABASE_URL) {
   const db = new DatabaseSync(DB_PATH);
   try { db.exec('PRAGMA journal_mode = WAL;'); } catch {}
   db.exec('PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA synchronous = NORMAL;');      // safe with WAL, much faster writes
+  db.exec('PRAGMA busy_timeout = 5000;');
+  // Dates are stored as 'YYYY-MM-DD'; case-sensitive LIKE lets "LIKE '2026-10%'"
+  // month filters use the date index. (No text search in the app relies on LIKE.)
+  db.exec('PRAGMA case_sensitive_like = ON;');
 
   db.exec(`
 CREATE TABLE IF NOT EXISTS users (
@@ -85,11 +94,27 @@ CREATE TABLE IF NOT EXISTS settings (
 `);
   try { db.exec('ALTER TABLE pickups ADD COLUMN stage TEXT'); } catch {}
 
+  // Indexes for the lookups the busy screens make (load test: customers list 13× faster).
+  for (const sql of [
+    'CREATE INDEX IF NOT EXISTS ix_pickups_customer_date ON pickups(customer_id, scheduled_date)',
+    'CREATE INDEX IF NOT EXISTS ix_pickups_driver_date ON pickups(driver_id, scheduled_date)',
+    'CREATE INDEX IF NOT EXISTS ix_pickups_vehicle_date ON pickups(vehicle_id, scheduled_date)',
+    'CREATE INDEX IF NOT EXISTS ix_pickups_completed ON pickups(completed_at)',
+    'CREATE INDEX IF NOT EXISTS ix_pickups_date_status ON pickups(scheduled_date, status)',
+  ]) { try { db.exec(sql); } catch {} }
+
+  // Prepared statements are cached by SQL text (most queries run many times a minute).
+  const stmts = new Map();
+  const prep = (sql) => {
+    let st = stmts.get(sql);
+    if (!st) { st = db.prepare(sql); if (stmts.size < 2000) stmts.set(sql, st); }
+    return st;
+  };
   const q = {
-    all: (sql, ...p) => db.prepare(sql).all(...p),
-    get: (sql, ...p) => db.prepare(sql).get(...p),
+    all: (sql, ...p) => prep(sql).all(...p),
+    get: (sql, ...p) => prep(sql).get(...p),
     run: (sql, ...p) => {
-      try { return db.prepare(sql).run(...p); }
+      try { return prep(sql).run(...p); }
       catch (e) {
         /* "ADD COLUMN" migrations run on every start; after the first start the
            column already exists. Treat that as done instead of crashing. */

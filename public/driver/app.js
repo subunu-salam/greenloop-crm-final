@@ -136,6 +136,8 @@ async function tryLogin() {
 }
 
 function logout() {
+  // stop pushes to this phone for the driver signing out (needs the token, so do it first)
+  try { if (window.GLPush) window.GLPush.signOut(); } catch {}
   localStorage.removeItem('gl_drv_token'); localStorage.removeItem('gl_drv_user');
   token = null; driver = null;
   $('#s-app').classList.add('hidden');
@@ -143,7 +145,24 @@ function logout() {
 }
 
 // ── app shell ────────────────────────────────────────────────
-const fmtDate = d => d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+// weekday + DD/MM/YYYY (date / month / year) so day and month can never be confused
+const fmtDate = d => `${d.toLocaleDateString(undefined, { weekday: 'long' })} · ${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+
+// System messages drop in at the TOP of the screen (v3.2). kind: 'info' | 'success' | 'error'
+function glToast(msg, kind = 'info') {
+  const wrap = $('#toasts'); if (!wrap) return;
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  el.innerHTML = `${svg(kind === 'error' ? IC.xCircle : kind === 'success' ? IC.checkCircle : IC.bell, 22)}<span></span>`;
+  el.querySelector('span').textContent = msg;
+  el.onclick = () => el.remove();
+  wrap.prepend(el);
+  while (wrap.children.length > 3) wrap.lastChild.remove();
+  if (kind === 'error' && navigator.vibrate) navigator.vibrate([80, 60, 80]);
+  setTimeout(() => el.remove(), kind === 'error' ? 7000 : 4500);
+}
+window.toast = glToast;
 function greeting() {
   const h = new Date().getHours();
   return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
@@ -166,7 +185,7 @@ let sock = null;
 function connectSocket() {
   try {
     if (sock) sock.disconnect();
-    sock = io();
+    sock = io({ auth: { token } });
     sock.on('connect', () => $('#hdr-live').classList.remove('off'));
     sock.on('disconnect', () => $('#hdr-live').classList.add('off'));
     sock.on('driver:at-risk', d => {
@@ -177,9 +196,16 @@ function connectSocket() {
         if (activeTab === 'home') renderHome();
       }
     });
+    // office messages: announcements, vehicle-report decisions, new stops
+    sock.on('driver:notify', n => {
+      pushNotif(n.kind === 'bad' ? 'bad' : 'info', n.title || 'GreenLoop', n.body || '');
+      glToast(`${n.title || ''}${n.body ? ' — ' + n.body : ''}`);
+      if (activeTab === 'vehicle' && typeof renderVehicle === 'function') renderVehicle();
+    });
     sock.on('driver:queue-updated', d => {
       if (driver?.vehicle && d.vehicle_id === driver.vehicle.id) {
         pushNotif('info', 'Route updated', 'The office changed your pickup queue. Check your route.');
+        glToast('Route updated — check your stops');
         loadJobs().then(() => { if (activeTab === 'home') renderHome(); });
       }
     });
@@ -191,7 +217,8 @@ function switchTab(tab) {
   activeTab = tab;
   $('#notif-panel').classList.add('hidden');
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
-  ['home', 'history', 'account'].forEach(v => $('#v-' + v).classList.toggle('hidden', v !== tab));
+  ['home', 'history', 'vehicle', 'account'].forEach(v => $('#v-' + v).classList.toggle('hidden', v !== tab));
+  if (tab === 'vehicle') renderVehicle();
   if (tab === 'home') { loadJobs().then(renderHome); renderHome(); }
   if (tab === 'history') renderHistory();
   if (tab === 'account') renderAccount();
@@ -226,7 +253,7 @@ function applyLang() {
   document.documentElement.dir = ['ur', 'ar'].includes(LANG) ? 'rtl' : 'ltr';
   document.querySelectorAll('[data-t]').forEach(el => { el.textContent = t(el.dataset.t); });
 }
-function setLang(l) { LANG = l; localStorage.setItem('gl_drv_lang', l); applyLang(); if (activeTab === 'account') renderAccount(); }
+function setLang(l) { LANG = l; localStorage.setItem('gl_drv_lang', l); applyLang(); if (activeTab === 'account') renderAccount(); if (activeTab === 'vehicle') renderVehicle(); }
 
 Object.assign(IC, {
   nav: '<polygon points="3 11 22 2 13 21 11 13 3 11"/>',
@@ -504,7 +531,7 @@ async function renderHistory() {
   rows.forEach(r => { (byDate[r.scheduled_date] ||= []).push(r); });
   const today = new Date().toISOString().slice(0, 10);
   const nice = d => d === today ? 'Today' :
-    new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+    `${new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short' })} · ${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}`;
   $('#v-history').innerHTML = `
     <div class="h-sec">${t('history')}</div>
     ${Object.entries(byDate).map(([date, list]) => `
@@ -535,7 +562,7 @@ async function renderAccount() {
     <div class="acct-hero">
       <div class="avatar">${initials(me.name)}</div>
       <div class="acct-name">${esc(me.name)}</div>
-      <div class="acct-sub">Driver since ${(me.since || '').slice(0, 10)}</div>
+      <div class="acct-sub">Driver since ${(me.since || '').slice(8, 10)}/${(me.since || '').slice(5, 7)}/${(me.since || '').slice(0, 4)}</div>
     </div>
     <div class="h-sec">This month</div>
     <div class="statgrid">
@@ -549,8 +576,20 @@ async function renderAccount() {
     <div class="inforow">${svg(IC.award, 20)}<div><span class="lbl">Career pickups completed</span><b>${me.stats.career_collected}</b></div></div>
     <div class="h-sec">${svg(IC.globe, 13)} ${t('lang')}</div>
     <div class="langs">${Object.entries(LANGS).map(([k, v]) => `<button class="${LANG === k ? 'on' : ''}" onclick="setLang('${k}')">${v}</button>`).join('')}</div>
+    <div class="h-sec">${svg(IC.bell, 13)} Notifications</div>
+    <div class="inforow" id="push-row">${pushRowHtml()}</div>
     <button class="logoutbtn" onclick="logout()">${svg(IC.logout, 18)} Sign out</button>`;
 }
+
+// notifications status on this phone (Account tab)
+function pushRowHtml() {
+  const st = window.GLPush ? window.GLPush.state() : 'unsupported';
+  const txt = { granted: 'On for this phone', default: 'Off — tap to turn on', denied: 'Blocked — allow in phone settings', 'ios-install': 'Add to Home Screen first', unsupported: 'Not supported in this browser' }[st];
+  return `${svg(IC.bell, 20)}<div style="flex:1"><span class="lbl">Route changes · at-risk stops · vehicle reports</span><b>${txt}</b></div>
+    ${st === 'default' || st === 'ios-install' ? `<button class="minibtn" onclick="pushTurnOn()">Turn on</button>` : st === 'granted' ? `<button class="minibtn" onclick="window.GLPush.test()">Test</button>` : ''}`;
+}
+async function pushTurnOn() { await window.GLPush.enable(); const r = $('#push-row'); if (r) r.innerHTML = pushRowHtml(); }
+document.addEventListener('glpush:change', () => { const r = $('#push-row'); if (r) r.innerHTML = pushRowHtml(); });
 
 // ── network layer with offline queue ────────────────────────
 function dataUrlToBlob(u) {
@@ -562,19 +601,21 @@ function dataUrlToBlob(u) {
   return new Blob([arr], { type: mime });
 }
 // returns {status:'ok'} | {status:'rejected', problems} ; throws on network/5xx (→ queue)
-async function transmit(p) {
+async function transmit(p, queued = false) {
   const fd = new FormData();
   fd.append('photo', dataUrlToBlob(p.photo), 'proof.jpg');
   fd.append('lat', p.lat ?? ''); fd.append('lng', p.lng ?? '');
   fd.append('photo_taken_at', p.photo_taken_at);
   fd.append('device_now', new Date().toISOString()); // checked against server clock (±5 min)
   fd.append('stamped', '1'); fd.append('stamp_text', p.stamp_text || ''); fd.append('source', 'camera');
+  if (queued) fd.append('queued', '1');   // sent later from the offline queue → office reviews instead of rejecting
   if (p.kind === 'complete') fd.append('checklist', JSON.stringify(p.checklist || []));
   else fd.append('reason', p.reason);
   const res = await fetch(`${API}/pickups/${p.pickupId}/${p.kind === 'complete' ? 'complete' : 'cancel'}`, {
     method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd,
   });
   if (res.ok || res.status === 409) return { status: 'ok' };
+  if (res.status === 429) throw new Error('rate limited');   // keep it queued, retry later
   if (res.status === 422 || res.status === 400 || res.status === 403 || res.status === 404) {
     const b = await res.json().catch(() => ({}));
     return { status: 'rejected', problems: b.problems || [b.error || 'Rejected by server'] };
@@ -598,7 +639,7 @@ async function flushQueue() {
   const remaining = [];
   for (const p of q) {
     try {
-      const r = await transmit(p);
+      const r = await transmit(p, true);
       if (r.status === 'rejected') pushNotif('bad', 'Saved photo rejected', `Job #${p.pickupId}: ${r.problems.join('; ')}`);
     } catch { remaining.push(p); }
   }
@@ -619,4 +660,8 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catc
 $('#login-date').textContent = fmtDate(new Date());
 applyLang();
 setQueue(getQueue());
-if (token && driver) enterApp();
+// a tapped notification (e.g. vehicle report answered) opens the right tab
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
+  if (e.data && e.data.type === 'gl-open' && token && driver) switchTab(String(e.data.url).includes('#vehicle') ? 'vehicle' : 'home');
+});
+if (token && driver) enterApp().then(() => { if (location.hash === '#vehicle') switchTab('vehicle'); });

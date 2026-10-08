@@ -102,3 +102,95 @@ New server module: `server/v3.js` (schema migrations run automatically on start,
 - The UAE holiday list for 2026 is approximate; edit it in CRM → Settings.
 - The Postgres mode (`db-pg.js`) does not support the v3 module.
 - Open PRD questions: SMS/email provider for OTP, payment gateway, final holiday calendar, VAT registration number on documents.
+
+---
+
+## v3.1 — security, performance and reliability fixes
+
+Result of a full QA pass (regression, edge-case, load and A/B performance testing).
+
+### What changed for users
+- **Customer sign-in is now mobile number + store code.** The number must match the
+  one on the customer's account in the CRM. New store codes are 6 digits; existing
+  4-digit codes keep working. Demo: mobile **050 000 1001** + code **1001** (also …1002, …1003).
+- Drivers can only act on their own jobs, and not before the scheduled day.
+- Proof photos must be taken within 15 minutes of upload. Photos sent later from the
+  driver app's offline queue are accepted but raise a **LATE_PROOF** alert for review.
+- The CRM warns while an account still uses the default `admin123` password.
+- "Service tomorrow" reminders go out at 17:00 UAE time (previously 21:00).
+
+### Security
+- Sign-in lockout: 5 wrong attempts (8 for driver PINs) → 15-minute lockout per IP and
+  per account. One-time codes: max 3 requests per 15 minutes.
+- No built-in JWT secret: if `JWT_SECRET` is not set, a random one is generated and kept
+  in `DATA_DIR/jwt-secret`. Set `JWT_SECRET` on the host so sessions survive restarts.
+- Proof photos are private: `/uploads` only serves time-limited signed links that the API
+  adds to its responses. Uploads must be JPEG/PNG/WebP/HEIC and get random file names.
+- Live updates (Socket.IO) require a valid login; office events go to staff only and each
+  customer only receives their own events.
+- CORS no longer combines a wildcard origin with credentials.
+- Input validation: real dates (≤ 1 year ahead), time windows that end after they start,
+  phone/email formats, text fields ≤ 5,000 characters, sane quotation quantities and prices.
+
+### Performance & reliability
+- New database indexes (customers list 7 → 160 req/s on 500 customers / 26k jobs),
+  prepared-statement cache, index-friendly month filters.
+- Nightly plan generation runs in batches (300 plans: 4.4 s freeze → 0.6 s, longest pause 0.1 s).
+- Daily SQLite backup (`VACUUM INTO`) next to the database, last 14 days kept.
+- Quote and invoice numbers can no longer repeat (database-enforced for invoices).
+
+### New / changed settings
+| Variable | Default | Purpose |
+|---|---|---|
+| `JWT_SECRET` | generated | Login signing secret — set it on the host |
+| `APP_TZ` | `Asia/Dubai` | Business time zone for "today" and reminder time |
+| `PHOTO_MAX_AGE_MIN` | `15` | Max minutes between taking and uploading a proof photo |
+| `BACKUP_DAYS` | `14` | Daily backups to keep (`BACKUP_DIR` to change location, `BACKUP_DISABLED=1` to turn off) |
+| `CORS_ORIGIN` | `*` | Comma-separated allowed origins if the API is called from another site |
+
+### Tests
+- `npm test` — regression suite + 50 edge-case/security checks (no install or network needed;
+  runs on every GitHub push via `.github/workflows/test.yml`).
+- `npm run test:load` — load test on 500 customers, 15 trucks, 26k jobs.
+
+---
+
+## v3.2 — fleet maintenance, capacity moderation, Gmail quotations, push
+
+Full requirements: `docs/PRD-Fleet-Tracker-v3.2.md`.
+
+### What changed for users
+- **Driver app → new Vehicle tab.** Report tyre damage, oil change, service, brakes… with urgency, photo, odometer and — if the driver paid — amount + receipt photo (payment proof is mandatory).
+- **CRM → Fleet maintenance.** Live reports, moderation, costs, payment proof, per-vehicle service history with CSV export, next-due reminders, driver reimbursements.
+- **CRM → Fleet Load Tracker.** Capacity is no longer fixed at 15: change a vehicle's default, or a single day (with a reason). Dates read `DD/MM/YYYY` with the month spelled out underneath.
+- **CRM → Push notifications.** Send an announcement to all customers, all drivers or everyone and see how many devices received it.
+- **Quotations go out by Gmail** (WhatsApp is a fallback button). Converting an accepted quote emails the app access. **Invoices are delivered in the customer app** with push; "Send to app" resends.
+- **System messages appear at the top** of the screen in CRM, driver and customer apps.
+- All dates are shown as **DD/MM/YYYY**.
+
+### Gmail (free) — pick one
+| Option | Environment variables | Notes |
+|---|---|---|
+| A. App password (easiest) | `GMAIL_USER`, `GMAIL_APP_PASSWORD` | Google Account → Security → 2-Step Verification → App passwords. Sends through `smtp.gmail.com:465`. |
+| B. Gmail API | `GMAIL_USER`, `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` | OAuth client with the `gmail.send` scope. Use this if your host blocks outbound SMTP. |
+
+Optional: `MAIL_FROM_NAME` (default `GreenLoop`). Check the connection in CRM → Settings → *Send test*.
+With neither option set, "Send via Gmail" opens a pre-written Gmail message for the user to send by hand.
+Free Gmail accounts are limited to roughly 500 recipients/day.
+
+### Push notifications — what was fixed
+- The customer app looked for its sign-in token in the wrong place, so **customer devices were never registered**. Fixed.
+- Devices were registered once and remembered forever; a second person signing in on the same phone, or a site switch, kept sending to the old account. Devices now re-register on every sign-in / site switch and are removed on sign-out.
+- Invoice alerts are addressed to the account while devices were registered per site → multi-site customers missed them. Alerts now reach every device on the account.
+- The driver app's icon file was missing (blocked "Add to Home Screen" on some phones). Added.
+- There was no admin-wide send. Added, with a delivery report.
+
+Requirements that have not changed: HTTPS in production; on iPhone the app must be added to the Home Screen before notifications can be enabled (Apple's rule); keep `data/vapid.json` (or `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY`) stable across deploys — if the keys change, every device re-registers the next time the app is opened.
+
+### New API
+`POST /driver/vehicle-reports` (multipart: photo, receipt) · `GET /driver/vehicle-reports` · `GET/POST /fleet/maintenance` · `PUT /fleet/maintenance/:id` · `POST /fleet/maintenance/:id/proof` · `GET /fleet/maintenance/vehicle/:id` ·
+`PUT /fleet/capacity/default` · `PUT/DELETE /fleet/capacity/override` · `POST /push/broadcast` · `GET /push/stats|status` · `POST /push/test` ·
+`POST /quotations/:id/send {via: gmail|whatsapp}` · `GET /mail/status` · `POST /mail/test` · `POST /invoices/:id/send`
+
+### Not changed in this build
+`crm-react/` (the experimental CRM v2) and `mobile-expo/` (native driver app) do not have the new screens yet.

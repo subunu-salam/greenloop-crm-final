@@ -18,7 +18,10 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const AED = n => 'AED ' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const today = () => new Date().toISOString().slice(0, 10);
-const nice = d => new Date(d + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+const nice = d => new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+// One date format everywhere: DD/MM/YYYY (date / month / year)
+const dmy = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || '')); return m ? `${m[3]}/${m[2]}/${m[1]}` : (s ? String(s) : '—'); };
+const dmyTime = s => { const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}:\d{2})/.exec(String(s || '')); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}` : dmy(s); };
 const reasonTxt = r => ({ CLOSED: 'Site was closed', NO_ACCESS: 'No access to the bins', NO_WASTE: 'No waste to collect', CUSTOMER_REFUSED: 'Service refused on site',
   BIN_EMPTY: 'Bin empty', ACCESS_BLOCKED: 'Access blocked', MANAGER_REFUSED: 'Manager refused' }[r] || String(r || '').replace(/_/g, ' ').toLowerCase());
 
@@ -28,9 +31,10 @@ function loginMode(m) {
   $('#login-code').classList.toggle('hidden', m !== 'code'); $('#login-otp').classList.toggle('hidden', m !== 'otp');
   $('#login-msg').textContent = '';
 }
-function pinKey(n) { if (pin.length >= 4) return; pin += String(n); renderDots(); if (pin.length === 4) doLogin(); }
+// Codes are 6 digits (older accounts: 4). Auto-submit at 6; Sign in button from 4.
+function pinKey(n) { if (pin.length >= 6) return; pin += String(n); renderDots(); if (pin.length === 6) doLogin(); }
 function pinDel() { pin = pin.slice(0, -1); renderDots(); $('#login-msg').textContent = ''; }
-function renderDots() { [...$('#pin-dots').children].forEach((d, i) => d.classList.toggle('on', i < pin.length)); }
+function renderDots() { [...$('#pin-dots').children].forEach((d, i) => d.classList.toggle('on', i < pin.length)); const b = $('#code-go'); if (b) b.disabled = pin.length < 4; }
 function signedIn(data) {
   token = data.token; me = data.customer;
   localStorage.setItem('gl_cust_token', token); localStorage.setItem('gl_cust_me', JSON.stringify(me));
@@ -44,7 +48,9 @@ async function post(path, body) {
 }
 async function doLogin() {
   $('#login-msg').textContent = '';
-  try { signedIn(await post('/auth/customer-login', { code: pin })); }
+  const phone = ($('#login-phone').value || '').trim();
+  if (!phone) { $('#login-msg').textContent = 'Enter the mobile number on your account first'; pin = ''; renderDots(); $('#login-phone').focus(); return; }
+  try { localStorage.setItem('gl_cust_phone', phone); signedIn(await post('/auth/customer-login', { phone, code: pin })); }
   catch (e) { $('#login-msg').textContent = e.message; }
   pin = ''; renderDots();
 }
@@ -76,6 +82,8 @@ async function api(path, opts = {}) {
 function openDoc(path) { window.open(`${API}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}`, '_blank'); }
 
 function logout() {
+  // stop pushes to this phone for the account being signed out (needs the token, so do it first)
+  try { if (window.GLPush) window.GLPush.signOut(); } catch {}
   token = null; me = null;
   localStorage.removeItem('gl_cust_token'); localStorage.removeItem('gl_cust_me');
   if (socket) socket.disconnect();
@@ -92,10 +100,10 @@ function boot() {
   refreshBell();
   try {
     if (socket) socket.disconnect();
-    socket = io();
+    socket = io({ auth: { token } });
     socket.on('connect', () => { $('#hdr-live').classList.remove('off'); socket.emit('customer:join', { customer_id: me.id }); });
     socket.on('disconnect', () => $('#hdr-live').classList.add('off'));
-    socket.on('customer:notify', n => { toast(n.title + ' — ' + n.body); refreshBell(); if (['home', 'bills', 'plans'].includes(currentTab)) switchTab(currentTab); });
+    socket.on('customer:notify', n => { toast(n.title + ' — ' + n.body, n.kind === 'invoice' || n.kind === 'announcement' ? 'info' : 'success'); refreshBell(); if (['home', 'bills', 'plans'].includes(currentTab)) switchTab(currentTab); });
     socket.on('pickup:completed', () => { if (currentTab === 'home') loadHome(); });
     socket.on('pickup:arrived', () => { toast('Driver has arrived at your location'); if (currentTab === 'home') loadHome(); });
     socket.on('driver:nearby', d => {
@@ -106,9 +114,18 @@ function boot() {
       }
     });
   } catch { /* offline */ }
-  const hash = location.hash.replace('#', '');
-  switchTab(['plans', 'bills', 'history', 'more'].includes(hash) ? hash : (hash === 'invoices' ? 'bills' : 'home'));
+  switchTab(tabFromHash());
 }
+// deep links used by push notifications: /customer/#invoices, #history, #confirm …
+function tabFromHash(h = location.hash) {
+  const hash = String(h).replace(/^.*#/, '');
+  return ['plans', 'bills', 'history', 'more'].includes(hash) ? hash : hash === 'invoices' ? 'bills' : 'home';
+}
+window.addEventListener('hashchange', () => { if (token && me) switchTab(tabFromHash()); });
+// a tapped notification while the app is already open → jump to the right screen
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
+  if (e.data && e.data.type === 'gl-open' && token && me) { switchTab(tabFromHash(e.data.url)); refreshBell(); }
+});
 function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
@@ -116,12 +133,28 @@ function switchTab(tab) {
   ({ home: loadHome, plans: loadPlans, bills: loadBills, history: loadHistory, more: loadMore })[tab]();
   window.scrollTo(0, 0);
 }
-function toast(msg) {
+// System messages drop in at the TOP of the screen (v3.2) so they are seen immediately.
+// kind: 'info' | 'success' | 'error'
+function toast(msg, kind = 'info') {
+  const wrap = $('#toasts');
   const t = document.createElement('div');
-  t.className = 'toast'; t.textContent = msg;
-  $('#toasts').appendChild(t);
-  setTimeout(() => t.remove(), 4200);
+  t.className = 'toast ' + kind;
+  t.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  const ic = { info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>', success: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>', error: '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>' }[kind] || '';
+  t.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${ic}</svg><span></span>`;
+  t.querySelector('span').textContent = msg;
+  t.onclick = () => t.remove();
+  wrap.prepend(t);
+  while (wrap.children.length > 3) wrap.lastChild.remove();
+  setTimeout(() => t.remove(), kind === 'error' ? 7000 : 4500);
 }
+// Errors written into a form (.err / login message) are also raised at the top.
+new MutationObserver(muts => {
+  for (const m of muts) {
+    const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+    if (el && el.classList && (el.classList.contains('err') || el.classList.contains('login-err')) && el.textContent.trim()) toast(el.textContent.trim(), 'error');
+  }
+}).observe(document.body, { childList: true, characterData: true, subtree: true });
 function openSheet(html) { $('#sheet-body').innerHTML = html; $('#sheet-wrap').classList.remove('hidden'); }
 function closeSheet() { $('#sheet-wrap').classList.add('hidden'); }
 const loading = el => { el.innerHTML = '<div class="skel"></div><div class="skel"></div>'; };
@@ -143,7 +176,7 @@ async function refreshBell() {
 }
 async function openNotifs() {
   const r = await refreshBell();
-  openSheet(`<h3>Notifications</h3>${r && r.rows.length ? r.rows.map(n => `<div class="notif ${n.is_read ? '' : 'unread'}"><b>${esc(n.title)}</b><p>${esc(n.body)}</p><small>${esc(String(n.created_at).slice(0, 16))}</small></div>`).join('')
+  openSheet(`<h3>Notifications</h3>${r && r.rows.length ? r.rows.map(n => `<div class="notif ${n.is_read ? '' : 'unread'}"><b>${esc(n.title)}</b><p>${esc(n.body)}</p><small>${dmyTime(n.created_at)}</small></div>`).join('')
     : '<p class="muted">Nothing yet. You will hear from us the day before a visit, when the driver starts, when a job is completed, and when an invoice is issued.</p>'}`);
   api('/customer/notifications/read', { method: 'POST' }).then(refreshBell).catch(() => {});
 }
@@ -336,7 +369,7 @@ async function saveBooking() {
   const ws = $('#bk-ws').value, we = $('#bk-we').value;
   try {
     await api('/customer/bookings', { method: 'POST', body: { service_code: $('#bk-s').value, date: $('#bk-d').value, time_window: ws && we ? `${ws}-${we}` : null, notes: $('#bk-n').value } });
-    closeSheet(); toast('Request sent — we will confirm shortly'); if (currentTab === 'plans') loadPlans();
+    closeSheet(); toast('Request sent — we will confirm shortly', 'success'); if (currentTab === 'plans') loadPlans();
   } catch (e) { $('#sh-err').textContent = e.message; }
 }
 
@@ -350,10 +383,10 @@ async function loadBills() {
         ${d.overdue > 0 ? `<p class="warn">${AED(d.overdue)} overdue</p>` : '<p class="muted">Thank you — all settled.</p>'}</div>
       <div class="sec-head"><h2>Invoices</h2></div>
       ${d.rows.length ? d.rows.map(i => `<button class="card inv" onclick="openDoc('/invoices/${i.id}/pdf')">
-        <span><b>${esc(i.number)}</b><small>${esc(i.period)} · ${i.job_ids.length} visit(s) · due ${esc(i.due_date)}</small></span>
+        <span><b>${esc(i.number)}</b><small>${esc(i.period.slice(5))}/${esc(i.period.slice(0, 4))} · ${i.job_ids.length} visit(s) · due ${dmy(i.due_date)} · tap for PDF</small></span>
         <span class="r"><b>${AED(i.amount)}</b><span class="pill ${esc(i.status_label.split(' ')[0])}">${esc(i.status_label)}</span></span></button>`).join('')
       : '<div class="card"><p class="muted">No invoices yet.</p></div>'}
-      ${d.payments.length ? `<div class="sec-head"><h2>Payments</h2></div><div class="card">${d.payments.map(p => `<div class="line"><span><b>${AED(p.amount)}</b><small>${esc(p.number)} · ${esc(p.method)}</small></span><span class="muted small">${esc(String(p.received_at).slice(0, 10))}</span></div>`).join('')}</div>` : ''}`;
+      ${d.payments.length ? `<div class="sec-head"><h2>Payments</h2></div><div class="card">${d.payments.map(p => `<div class="line"><span><b>${AED(p.amount)}</b><small>${esc(p.number)} · ${esc(p.method)}</small></span><span class="muted small">${dmy(p.received_at)}</span></div>`).join('')}</div>` : ''}`;
   } catch (e) { el.innerHTML = `<p class="empty">${esc(e.message)}</p>`; }
 }
 
@@ -392,15 +425,35 @@ async function loadMore() {
       <div class="card"><h3>Access notes for drivers</h3><p class="muted small">Gate codes, rear entrance, best time — shown in the driver app.</p>
         <textarea id="access-notes" rows="4">${esc(p.access_notes || '')}</textarea>
         <button class="btn primary full" onclick="saveAccessNotes()">Save notes</button></div>
-      ${quotes.length ? `<div class="card"><h3>Quotations</h3>${quotes.map(q => `<div class="line"><span><b>${esc(q.number)} v${q.version}</b><small>${AED(q.total)} · valid until ${esc(q.valid_until)}</small></span>
+      <div class="card" id="push-card">${pushCardHtml()}</div>
+      ${quotes.length ? `<div class="card"><h3>Quotations</h3>${quotes.map(q => `<div class="line"><span><b>${esc(q.number)} v${q.version}</b><small>${AED(q.total)} · valid until ${dmy(q.valid_until)}</small></span>
         <span class="r"><span class="pill ${esc(q.status)}">${esc(q.status)}</span> <button class="btn ghost small" onclick="window.open('/q/${esc(q.share_token)}','_blank')">View</button></span></div>`).join('')}</div>` : ''}
       <button class="btn danger full" onclick="logout()">Sign out</button>`;
   } catch (e) { el.innerHTML = `<p class="empty">${esc(e.message)}</p>`; }
 }
 async function saveAccessNotes() {
-  try { await api('/customer/access-notes', { method: 'PUT', body: { access_notes: ($('#access-notes') || {}).value || '' } }); toast('Access notes saved'); }
-  catch (e) { toast(e.message); }
+  try { await api('/customer/access-notes', { method: 'PUT', body: { access_notes: ($('#access-notes') || {}).value || '' } }); toast('Access notes saved', 'success'); }
+  catch (e) { toast(e.message, 'error'); }
 }
+// Notifications card (More tab): shows whether this phone receives pushes and lets the customer fix it.
+function pushCardHtml() {
+  const st = window.GLPush ? window.GLPush.state() : 'unsupported';
+  const info = {
+    granted: ['ok', 'On for this device', 'You get alerts for visits, invoices and announcements even when the app is closed.'],
+    default: ['warn', 'Off on this device', 'Turn on to hear about your driver, completed visits and new invoices.'],
+    denied: ['blocked', 'Blocked in your browser', 'Open your phone / browser settings for this site, allow notifications, then come back.'],
+    'ios-install': ['warn', 'Add to Home Screen first', 'On iPhone: Safari → Share → Add to Home Screen, then open GreenLoop from the new icon.'],
+    unsupported: ['muted', 'Not supported in this browser', 'Use Chrome, Edge, Firefox or Safari. You still see every message under the bell icon.'],
+  }[st];
+  return `<h3>Notifications</h3><p class="${info[0]}" style="font-weight:800">${info[1]}</p><p class="muted small" style="margin:4px 0 2px">${info[2]}</p>
+    ${st === 'default' ? '<button class="btn primary full" onclick="pushEnable()">Enable notifications</button>' : ''}
+    ${st === 'granted' ? '<button class="btn ghost full" onclick="window.GLPush.test()">Send me a test notification</button>' : ''}`;
+}
+async function pushEnable() { await window.GLPush.enable(); const c = $('#push-card'); if (c) c.innerHTML = pushCardHtml(); }
+document.addEventListener('glpush:change', () => { const c = $('#push-card'); if (c) c.innerHTML = pushCardHtml(); });
 
 if (token && me) boot();
 else $('#s-login').classList.remove('hidden');
+
+// Remember the mobile number used last time on this device.
+try { const lp = localStorage.getItem('gl_cust_phone'); if (lp && document.getElementById('login-phone')) document.getElementById('login-phone').value = lp; } catch {}

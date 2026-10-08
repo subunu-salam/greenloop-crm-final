@@ -2,8 +2,10 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { q, getSetting } = require('./db');
+const security = require('./security');
 
-const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+require('./security').ensureSecret();
+const SECRET = process.env.JWT_SECRET;
 
 function signCustomer(c) {
   return jwt.sign(
@@ -31,12 +33,16 @@ function authCustomer(req, res, next) {
 // Called at mount AND again after DB seeding (fresh installs seed later).
 function seedPortalCodes() {
   try {
+    // Demo accounts: mobile 050 000 100X + code 100X (only set when the
+    // customer has no code yet, i.e. a freshly seeded demo database).
     const first = q.all(`SELECT id, portal_code_hash h FROM customers WHERE is_active=1 ORDER BY id LIMIT 3`);
     let n = 0;
     ['1001', '1002', '1003'].forEach((code, i) => {
-      if (first[i] && !first[i].h) { q.run(`UPDATE customers SET portal_code_hash=? WHERE id=?`, bcrypt.hashSync(code, 10), first[i].id); n++; }
+      if (first[i] && !first[i].h) {
+        q.run(`UPDATE customers SET portal_code_hash=?, contact_phone=? WHERE id=?`, bcrypt.hashSync(code, 10), '+97150000' + code, first[i].id); n++;
+      }
     });
-    if (n) console.log('✔ Customer demo codes ready: 1001 1002 1003');
+    if (n) console.log('✔ Customer demo logins ready: mobile 050 000 1001 / code 1001 (also …1002, …1003)');
   } catch (e) { console.warn('Customer portal seed:', e.message); }
 }
 
@@ -48,12 +54,23 @@ function mountCustomerRoutes(r, io) {
 
   seedPortalCodes();
 
+  // Sign in with the account's mobile number (or email) + its store code.
+  // Only the matching account's code is checked (one bcrypt compare), and
+  // index.js throttles failed attempts per IP and per number.
   r.post('/auth/customer-login', (req, res) => {
     const code = String((req.body || {}).code || '');
-    if (!/^\d{4}$/.test(code)) return res.status(400).json({ error: 'Code must be 4 digits' });
-    const rows = q.all(`SELECT * FROM customers WHERE is_active=1 AND portal_code_hash IS NOT NULL`);
-    const c = rows.find((row) => row.portal_code_hash && bcrypt.compareSync(code, row.portal_code_hash));
-    if (!c) return res.status(401).json({ error: 'Invalid store code' });
+    const who = String((req.body || {}).phone || '').trim();
+    if (!who) return res.status(400).json({ error: 'Enter the mobile number on your account' });
+    if (!/^\d{4,6}$/.test(code)) return res.status(400).json({ error: 'Store code must be 4 to 6 digits' });
+    const key = security.phoneKey(who), email = who.includes('@') ? who.toLowerCase() : null;
+    if (!email && key.length < 7) return res.status(400).json({ error: 'Enter a valid mobile number' });
+    // sites whose phone/email matches → their account (codes live on the account row)
+    const sites = q.all(`SELECT id, COALESCE(account_id, id) acct, contact_phone, email FROM customers WHERE is_active=1`)
+      .filter((s) => email ? String(s.email || '').toLowerCase() === email : security.phoneKey(s.contact_phone) === key);
+    const accts = [...new Set(sites.map((s) => s.acct))].slice(0, 5);
+    const c = accts.map((id) => q.get(`SELECT * FROM customers WHERE id=? AND is_active=1 AND portal_code_hash IS NOT NULL`, id))
+      .find((row) => row && bcrypt.compareSync(code, row.portal_code_hash));
+    if (!c) return res.status(401).json({ error: 'Mobile number or store code is incorrect' });
     res.json({
       token: signCustomer(c),
       customer: {
@@ -174,7 +191,7 @@ function mountCustomerRoutes(r, io) {
     );
     const msg = `Customer note (${req.user.name}): ${notes}`;
     q.run(`INSERT INTO alerts(type,severity,message,pickup_id) VALUES ('INFO','info',?,?)`, msg, p.id);
-    io.emit('alert', { type: 'INFO', severity: 'info', message: msg, pickup_id: p.id });
+    io.to('staff').emit('alert', { type: 'INFO', severity: 'info', message: msg, pickup_id: p.id });
     res.json({ ok: true });
   });
 
@@ -185,7 +202,7 @@ function mountCustomerRoutes(r, io) {
     const message =
       String((req.body || {}).message || 'Access issue reported by store') + ' — ' + req.user.name;
     q.run(`INSERT INTO alerts(type,severity,message,pickup_id) VALUES ('ANOMALY','warning',?,?)`, message, p.id);
-    io.emit('alert', { type: 'ANOMALY', severity: 'warning', message, pickup_id: p.id });
+    io.to('staff').emit('alert', { type: 'ANOMALY', severity: 'warning', message, pickup_id: p.id });
     res.json({ ok: true });
   });
 }

@@ -1,7 +1,8 @@
 const { q } = require('./db');
 const tracking = require('./tracking');
 const jwt = require('jsonwebtoken');
-const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+require('./security').ensureSecret();
+const SECRET = process.env.JWT_SECRET;
 
 let push;
 try {
@@ -52,7 +53,7 @@ function markArrived(pickupId, io, meta = {}) {
     auto: !!meta.auto,
   };
   if (io) {
-    io.emit('pickup:arrived', payload);
+    io.to('staff').emit('pickup:arrived', payload);
     if (info?.customer_id) io.to('customer:' + info.customer_id).emit('pickup:arrived', payload);
   }
   if (push && info?.customer_id) {
@@ -109,9 +110,8 @@ function mountOpsFeatureRoutes(r, io) {
   r.post('/pickups/:id/arrive', auth('driver'), (req, res) => {
     const p = q.get(`SELECT * FROM pickups WHERE id=?`, req.params.id);
     if (!p) return res.status(404).json({ error: 'Not found' });
-    if (p.driver_id && p.driver_id !== req.user.id) {
-      return res.status(403).json({ error: 'Not your job' });
-    }
+    const denied = require('./security').driverJobError(p, req.user);
+    if (denied) return res.status(denied[0]).json({ error: denied[1] });
     markArrived(p.id, io, { driver: req.user.name });
     res.json({ ok: true, stage: 'arrived' });
   });

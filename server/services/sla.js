@@ -23,9 +23,9 @@ function checkNow(io) {
     q.run(`UPDATE pickups SET status = 'overdue', updated_at = datetime('now') WHERE id = ?`, l.id);
     const msg = `SLA BREACH: ${l.name} (${l.branch}) still pending after ${cutoff} — vehicle ${l.fleet_number || 'unassigned'}`;
     q.run(`INSERT INTO alerts(type, severity, message, pickup_id) VALUES ('SLA_BREACH','critical',?,?)`, msg, l.id);
-    if (io) io.emit('alert', { type: 'SLA_BREACH', severity: 'critical', message: msg, pickup_id: l.id });
+    if (io) io.to('staff').emit('alert', { type: 'SLA_BREACH', severity: 'critical', message: msg, pickup_id: l.id });
   }
-  if (late.length && io) io.emit('ledger:refresh', { date: today });
+  if (late.length && io) io.to('staff').emit('ledger:refresh', { date: today });
   return { breaches: late.length, cutoff };
 }
 

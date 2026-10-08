@@ -14,21 +14,27 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const security = require('./security');
 const { q, getSetting, setSetting } = require('./db');
 
 let push = null;
 try { push = require('./push'); } catch { push = null; }
+const mailer = require('./mailer');
 
-const SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+require('./security').ensureSecret();
+const SECRET = process.env.JWT_SECRET;
 const VAT_RATE = 0.05;
 const PROOF_RADIUS_M = Number(process.env.PROOF_RADIUS_M || 150);
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const PHOTO_MAX_AGE_MIN = Number(process.env.PHOTO_MAX_AGE_MIN || 15);
 const CONFIRM_WINDOW_H = 24;
 
 // ── helpers ──────────────────────────────────────────────────
 const ymd = (d = new Date()) => new Date(d).toISOString().slice(0, 10);
 const addDays = (s, n) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return ymd(d); };
 const nowIso = () => new Date().toISOString();
+// Dates are shown to people as DD/MM/YYYY everywhere (stored as YYYY-MM-DD).
+const dmy = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(s || '')); return m ? `${m[3]}/${m[2]}/${m[1]}` : String(s || '—'); };
 const money = n => Math.round(Number(n || 0) * 100) / 100;
 const J = (s, fb) => { try { return s ? JSON.parse(s) : fb; } catch { return fb; } };
 function haversineM(a, b) {
@@ -159,6 +165,10 @@ CREATE TABLE IF NOT EXISTS otp_codes (
   ].forEach(tryExec);
   tryExec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_pickups_plan_date ON pickups(plan_id, scheduled_date) WHERE plan_id IS NOT NULL AND is_revisit = 0`);
   tryExec(`CREATE INDEX IF NOT EXISTS idx_pickups_conf ON pickups(confirmation_status)`);
+  tryExec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_invoices_number ON invoices(number)`);
+  tryExec(`CREATE INDEX IF NOT EXISTS ix_invoices_customer ON invoices(customer_id)`);
+  tryExec(`CREATE INDEX IF NOT EXISTS ix_pickups_invoice ON pickups(invoice_id)`);
+  tryExec(`CREATE INDEX IF NOT EXISTS ix_payments_invoice ON payments(invoice_id)`);
 
   if (!q.get(`SELECT id FROM service_types LIMIT 1`)) {
     const ins = (code, name, cat, dur, price, list) =>
@@ -178,6 +188,9 @@ CREATE TABLE IF NOT EXISTS otp_codes (
   if (!getSetting('default_time_window', '')) setSetting('default_time_window', '07:00-12:00');
   if (!getSetting('invoice_due_days', '')) setSetting('invoice_due_days', '15');
   if (!getSetting('company_whatsapp', '')) setSetting('company_whatsapp', '+971500000001');
+  tryExec(`ALTER TABLE invoices ADD COLUMN sent_at TEXT`);
+  tryExec(`ALTER TABLE invoices ADD COLUMN sent_count INTEGER NOT NULL DEFAULT 0`);
+  tryExec(`ALTER TABLE quotations ADD COLUMN sent_to TEXT`);
   q.run(`UPDATE vehicles SET service_tags='waste' WHERE service_tags IS NULL`);
 
   q.run(`UPDATE users SET crm_role='owner' WHERE role='admin' AND crm_role IS NULL`);
@@ -243,12 +256,23 @@ function audit(req, entity, id, action, before, after) {
 let IO = null;
 function alertCrm(type, severity, message, pickupId = null) {
   q.run(`INSERT INTO alerts(type,severity,message,pickup_id) VALUES (?,?,?,?)`, type, severity, message, pickupId);
-  if (IO) IO.emit('alert', { type, severity, message, pickup_id: pickupId });
+  if (IO) IO.to('staff').emit('alert', { type, severity, message, pickup_id: pickupId });
 }
 function notifyCustomer(customerId, kind, title, body, link = '/customer/') {
   q.run(`INSERT INTO customer_notifications(customer_id,kind,title,body,link) VALUES (?,?,?,?,?)`, customerId, kind, title, body, link);
   if (IO) IO.to('customer:' + customerId).emit('customer:notify', { kind, title, body });
-  if (push) push.sendPush('customer', customerId, title, body, link).catch(() => {});
+  // returns the push delivery report so callers can show "delivered to N device(s)"
+  if (!push) return Promise.resolve({ devices: 0, delivered: 0, failed: 0, removed: 0 });
+  return push.sendPush('customer', customerId, title, body, link).catch(() => ({ devices: 0, delivered: 0, failed: 0, removed: 0 }));
+}
+// Push + live in-app alert for the driver(s) of a vehicle.
+function notifyVehicleDrivers(vehicleId, title, body) {
+  if (!vehicleId) return;
+  try {
+    q.all(`SELECT id FROM users WHERE role='driver' AND is_active=1 AND vehicle_id=?`, vehicleId)
+      .forEach(d => { if (IO) IO.to('driver:' + d.id).emit('driver:notify', { kind: 'info', title, body }); });
+  } catch { /* ignore */ }
+  if (push) push.sendToVehicleDrivers(vehicleId, title, body).catch(() => {});
 }
 
 // ── recurrence engine (§7) ───────────────────────────────────
@@ -288,7 +312,8 @@ function validateRule(r) {
   if (r.type === 'monthly' && r.mode !== 'nth' && !(Number(r.date) >= 1 && Number(r.date) <= 28)) return 'Monthly date must be 1–28';
   return null;
 }
-const WIN_RX = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
+// Valid "HH:MM-HH:MM" that ends after it starts (used as WIN_RX.test(...) everywhere).
+const WIN_RX = { test: (w) => !security.windowError(w) };
 const holidays = () => new Set(J(getSetting('uae_holidays', '[]'), []));
 const isPaused = (plan, date) => !!plan.paused && (!plan.pause_from || date >= plan.pause_from) && (!plan.pause_to || date <= plan.pause_to);
 
@@ -302,9 +327,7 @@ function zoneCentroids() {
   q.all(`SELECT zone, AVG(lat) lat, AVG(lng) lng FROM customers GROUP BY zone`).forEach(z => { m[z.zone] = z; });
   return m;
 }
-function loadOf(vehicleId, date) {
-  return q.get(`SELECT COUNT(*) c FROM pickups WHERE vehicle_id=? AND scheduled_date=? AND status IN ('pending','collected','overdue')`, vehicleId, date).c;
-}
+const { capacityFor, loadOf } = require('./capacity');
 function allocate(customer, date, serviceCode) {
   const cat = serviceCategory(serviceCode);
   const cents = zoneCentroids();
@@ -320,7 +343,7 @@ function allocate(customer, date, serviceCode) {
   vehicles.sort((a, b) => dist(a) - dist(b));
   for (const v of vehicles) {
     const load = loadOf(v.id, date);
-    if (load < v.max_daily_capacity) {
+    if (load < capacityFor(v, date)) {
       const drv = q.get(`SELECT id FROM users WHERE role='driver' AND is_active=1 AND vehicle_id=? ORDER BY id LIMIT 1`, v.id);
       return { vehicle: v, driver_id: drv ? drv.id : null, load };
     }
@@ -379,7 +402,7 @@ function generatePlans({ days = 14, planId = null } = {}) {
   }
   Object.values(unalloc).forEach(u => alertCrm('UNALLOCATED', 'warning',
     `${u.dates.length} job(s) for ${u.c.name} (${u.c.branch || ''}) not allocated — ${u.reason}. Dates: ${u.dates.slice(0, 5).join(', ')}${u.dates.length > 5 ? '…' : ''}`));
-  if (created && IO) IO.emit('ledger:refresh', {});
+  if (created && IO) IO.to('staff').emit('ledger:refresh', {});
   return { created, skipped, unallocated: Object.values(unalloc).reduce((a, u) => a + u.dates.length, 0) };
 }
 function regeneratePlan(planId) {
@@ -395,7 +418,7 @@ function validateProof(pickup, body) {
   const c = q.get(`SELECT name, lat, lng FROM customers WHERE id=?`, pickup.customer_id);
   const lat = Number(body.lat), lng = Number(body.lng);
   const problems = [];
-  let distance = null;
+  let distance = null, lateMin = 0;
   if (!isFinite(lat) || !isFinite(lng) || (lat === 0 && lng === 0) || body.lat === '' || body.lat == null) problems.push('no GPS fix on photo');
   else if (c && c.lat != null) {
     distance = Math.round(haversineM({ lat, lng }, { lat: Number(c.lat), lng: Number(c.lng) }));
@@ -409,11 +432,26 @@ function validateProof(pickup, body) {
   if (!isFinite(taken)) problems.push('missing photo time');
   else if (isFinite(devNow) && taken > devNow + 60000) problems.push('photo time is in the future');
   else if (ymd(new Date(taken)) !== pickup.scheduled_date && ymd(new Date(taken)) !== ymd()) problems.push('photo not taken on the service day');
+  else if (isFinite(devNow)) {
+    // Proof must be fresh. Uploads from the driver app's offline queue are accepted
+    // but flagged (late_min) so the office can review them.
+    const ageMin = Math.round((devNow - taken) / 60000);
+    if (ageMin > PHOTO_MAX_AGE_MIN) {
+      if (String(body.queued) === '1') lateMin = ageMin;
+      else problems.push(`photo taken ${ageMin} min before upload (limit ${PHOTO_MAX_AGE_MIN} min) — take a new photo`);
+    }
+  }
   if (String(body.stamped) !== '1' || !String(body.stamp_text || '').includes(String(c?.name || '').slice(0, 6)))
     problems.push('image lacks the on-device GPS stamp');
   if (String(body.source || 'camera') !== 'camera') problems.push('photo not from live camera');
   return { ok: problems.length === 0, problems, distance_m: distance,
-    meta: { lat, lng, distance_m: distance, photo_taken_at: body.photo_taken_at, device_now: body.device_now, server_at: new Date(serverNow).toISOString(), stamp: body.stamp_text } };
+    meta: { lat, lng, distance_m: distance, late_min: lateMin || undefined, photo_taken_at: body.photo_taken_at, device_now: body.device_now, server_at: new Date(serverNow).toISOString(), stamp: body.stamp_text } };
+}
+// Proof accepted from the offline queue but uploaded long after capture → office review.
+function flagLateProof(pickup, v, driverName) {
+  if (!v.meta || !v.meta.late_min) return;
+  const c = q.get(`SELECT name, branch FROM customers WHERE id=?`, pickup.customer_id);
+  alertCrm('LATE_PROOF', 'warning', `Proof for ${c?.name} (${c?.branch || ''}) by ${driverName} was uploaded ${v.meta.late_min} min after the photo was taken (offline). Please review.`, pickup.id);
 }
 function rejectProof(pickup, v, driverName, kind) {
   const c = q.get(`SELECT name, branch FROM customers WHERE id=?`, pickup.customer_id);
@@ -432,7 +470,9 @@ function priceFor(p) {
   return st ? st.default_price : 0;
 }
 function nextInvoiceNumber(period) {
-  const n = q.get(`SELECT COUNT(*) c FROM invoices WHERE number LIKE ?`, `INV-${period.replace('-', '')}-%`).c + 1;
+  // highest existing sequence + 1 (a count could repeat a number if one was ever removed)
+  const pre = `INV-${period.replace('-', '')}-`;
+  const n = (q.get(`SELECT MAX(CAST(substr(number, ?) AS INTEGER)) m FROM invoices WHERE number LIKE ?`, pre.length + 1, pre + '%').m || 0) + 1;
   return `INV-${period.replace('-', '')}-${String(n).padStart(4, '0')}`;
 }
 function accountOf(customerId) {
@@ -450,7 +490,9 @@ function createInvoice(accountId, period, jobs) {
     number, accountId, period, JSON.stringify(jobs.map(j => j.id)), JSON.stringify(lines), subtotal, vat, money(subtotal + vat), due);
   const id = Number(info.lastInsertRowid);
   jobs.forEach(j => q.run(`UPDATE pickups SET invoice_id=? WHERE id=?`, id, j.id));
-  notifyCustomer(accountId, 'invoice', `Invoice ${number} issued`, `AED ${money(subtotal + vat).toFixed(2)} due ${due}`, '/customer/#invoices');
+  // Step 3 of the workflow: the invoice (with its PDF) is delivered in the customer app + push
+  notifyCustomer(accountId, 'invoice', `Invoice ${number} issued`, `AED ${money(subtotal + vat).toFixed(2)} due ${dmy(due)} — tap to view the PDF`, '/customer/#invoices');
+  q.run(`UPDATE invoices SET sent_at=datetime('now'), sent_count=1 WHERE id=?`, id);
   return { id, number, amount: money(subtotal + vat) };
 }
 const BILLABLE_SQL = `SELECT p.*, c.name, c.branch, COALESCE(c.account_id, c.id) acct FROM pickups p JOIN customers c ON c.id=p.customer_id
@@ -487,6 +529,19 @@ function onNotPickedUp(pickupId) {
 }
 
 // ── sales helpers ────────────────────────────────────────────
+// Rejects impossible quotation lines instead of silently zeroing them.
+function quoteItemsError(items) {
+  if (!Array.isArray(items) || !items.length) return 'Add at least one priced line item';
+  if (items.length > 100) return 'Too many line items (max 100)';
+  for (const [i, it] of items.entries()) {
+    const qty = Number(it.qty), unit = Number(it.unit_price);
+    if (!isFinite(qty) || qty <= 0) return `Line ${i + 1}: quantity must be more than 0`;
+    if (qty > 100000) return `Line ${i + 1}: quantity is too large`;
+    if (!isFinite(unit) || unit < 0) return `Line ${i + 1}: price cannot be negative`;
+    if (unit > 1000000) return `Line ${i + 1}: unit price is too large (max AED 1,000,000)`;
+  }
+  return null;
+}
 function calcQuote(items) {
   const clean = (items || []).map(it => {
     const qty = Math.max(0, Number(it.qty) || 0), unit = Math.max(0, Number(it.unit_price) || 0);
@@ -499,7 +554,8 @@ function calcQuote(items) {
 }
 function nextQuoteNumber() {
   const y = new Date().getFullYear();
-  const n = q.get(`SELECT COUNT(DISTINCT number) c FROM quotations WHERE number LIKE ?`, `QT-${y}-%`).c + 1;
+  const pre = `QT-${y}-`;
+  const n = (q.get(`SELECT MAX(CAST(substr(number, ?) AS INTEGER)) m FROM quotations WHERE number LIKE ?`, pre.length + 1, pre + '%').m || 0) + 1;
   return `QT-${y}-${String(n).padStart(4, '0')}`;
 }
 function quoteView(qt) {
@@ -509,13 +565,11 @@ function quoteView(qt) {
   return { ...qt, items: J(qt.items, []), plan: J(qt.plan, {}), status: expired ? 'expired' : qt.status,
     lead: lead ? { ...lead, sites: J(lead.sites, []) } : null };
 }
+// Portal codes are 6 digits and are always used together with the account's
+// mobile number, so they no longer need to be globally unique (that check
+// cost one bcrypt comparison per customer).
 async function uniquePortalCode() {
-  const rows = q.all(`SELECT portal_code_hash FROM customers WHERE portal_code_hash IS NOT NULL`);
-  for (let i = 0; i < 40; i++) {
-    const code = String(crypto.randomInt(1000, 10000));
-    if (!rows.some(r => bcrypt.compareSync(code, r.portal_code_hash))) return code;
-  }
-  throw new Error('Could not generate a unique portal code');
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 // ── printable documents (branded HTML → browser "Save as PDF") ──
@@ -543,32 +597,52 @@ function brandHeader(docTitle, number, lines) {
   return `<div class="hd"><div class="brand">${LOGO}<div>GreenLoop<small>${h(getSetting('company_name', 'Majari / GreenLoop'))} · Waste management &amp; pest control · Dubai, UAE</small></div></div>
   <div class="meta"><b>${h(docTitle)}</b>${h(number)}<br>${lines.join('<br>')}</div></div>`;
 }
+// Email body for a quotation: summary + one button to view / download the PDF and accept.
+function quoteEmailHtml(qv, link) {
+  const lead = qv.lead || {};
+  const rows = qv.items.map(i => `<tr><td style="padding:8px;border-bottom:1px solid #e5e7eb">${h(i.description || i.service_code)}${i.site ? `<br><span style="color:#6b7280;font-size:12px">${h(i.site)}</span>` : ''}</td>
+    <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">${i.qty} × ${Number(i.unit_price).toFixed(2)}</td>
+    <td style="padding:8px;border-bottom:1px solid #e5e7eb;text-align:right">${Number(i.line_total).toFixed(2)}</td></tr>`).join('');
+  return `<div style="font:14px/1.55 'Segoe UI',Arial,sans-serif;color:#10241f;max-width:600px;margin:0 auto">
+  <div style="border-bottom:3px solid #14b8a6;padding-bottom:12px;margin-bottom:16px"><span style="font-size:22px;font-weight:800;color:#0f766e">GreenLoop</span>
+    <span style="float:right;text-align:right;font-size:12px;color:#374151"><b style="font-size:15px;color:#10241f">QUOTATION</b><br>${h(qv.number)} · v${qv.version}</span></div>
+  <p>Hello ${h(lead.contact || '')},</p>
+  <p>Thank you for your interest in GreenLoop. Your quotation is below — you can view it, download the PDF and accept it online.</p>
+  <table style="width:100%;border-collapse:collapse;margin:14px 0"><tr style="background:#f0fdfa;color:#0f766e;font-size:11px;text-transform:uppercase"><th style="padding:8px;text-align:left">Service</th><th style="padding:8px;text-align:right">Visits × unit (AED)</th><th style="padding:8px;text-align:right">Total (AED)</th></tr>${rows}
+    <tr><td colspan="2" style="padding:6px 8px;text-align:right">Subtotal</td><td style="padding:6px 8px;text-align:right">${qv.subtotal.toFixed(2)}</td></tr>
+    <tr><td colspan="2" style="padding:6px 8px;text-align:right">VAT 5%</td><td style="padding:6px 8px;text-align:right">${qv.vat.toFixed(2)}</td></tr>
+    <tr><td colspan="2" style="padding:8px;text-align:right;font-weight:800;color:#0f766e;border-top:2px solid #14b8a6">Total</td><td style="padding:8px;text-align:right;font-weight:800;color:#0f766e;border-top:2px solid #14b8a6">AED ${qv.total.toFixed(2)}</td></tr></table>
+  <p><b>Plan:</b> ${h(describeRule(qv.plan.recurrence))} · window ${h(qv.plan.time_window || '—')}<br><b>Valid until:</b> ${h(dmy(qv.valid_until))}</p>
+  <p style="margin:22px 0"><a href="${h(link)}" style="background:#0f766e;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:700;display:inline-block">View quotation, download PDF &amp; accept</a></p>
+  <p style="font-size:12px;color:#6b7280">Once you accept, we register your account and you receive access to the GreenLoop customer app, where your invoices (with PDF), visit photo-proof and reminders are delivered.</p>
+  <p style="font-size:12px;color:#6b7280">If the button does not work, open this link: ${h(link)}</p></div>`;
+}
 function quoteHtml(qv, opts = {}) {
   const lead = qv.lead || {};
   const rows = qv.items.map(i => `<tr><td><b>${h(i.description || i.service_code)}</b><br><span style="color:#6b7280">${h(i.site)}</span></td><td>${h(i.frequency)}</td><td class="r">${i.qty}</td><td class="r">${i.unit_price.toFixed(2)}</td><td class="r">${i.line_total.toFixed(2)}</td></tr>`).join('');
   const accept = opts.acceptUrl && ['sent', 'draft'].includes(qv.status)
     ? `<form method="post" action="${opts.acceptUrl}" style="display:inline"><button>Accept quotation</button></form>` : '';
   return docShell(`Quotation ${qv.number}`, `
-    ${brandHeader('QUOTATION', `${qv.number} · v${qv.version}`, [`Date: ${String(qv.created_at).slice(0, 10)}`, `Valid until: <b>${h(qv.valid_until || '—')}</b>`, `<span class="pill">${h(qv.status)}</span>`])}
+    ${brandHeader('QUOTATION', `${qv.number} · v${qv.version}`, [`Date: ${dmy(qv.created_at)}`, `Valid until: <b>${h(dmy(qv.valid_until))}</b>`, `<span class="pill">${h(qv.status)}</span>`])}
     <div class="two"><div class="box"><h4>Prepared for</h4><b>${h(lead.company || lead.contact)}</b><br>${h(lead.contact)}<br>${h(lead.phone)} ${h(lead.email || '')}</div>
-    <div class="box"><h4>Service plan</h4>${h(describeRule(qv.plan.recurrence))}<br>Window ${h(qv.plan.time_window || '—')} · from ${h(qv.plan.start_date || 'on acceptance')}<br>Billing: ${h(qv.plan.billing === 'per_visit' ? 'per visit' : 'monthly')}</div></div>
+    <div class="box"><h4>Service plan</h4>${h(describeRule(qv.plan.recurrence))}<br>Window ${h(qv.plan.time_window || '—')} · from ${h(qv.plan.start_date ? dmy(qv.plan.start_date) : 'on acceptance')}<br>Billing: ${h(qv.plan.billing === 'per_visit' ? 'per visit' : 'monthly')}</div></div>
     <table><tr><th>Service / site</th><th>Frequency</th><th class="r">Visits</th><th class="r">Unit (AED)</th><th class="r">Total (AED)</th></tr>${rows}</table>
     <table class="tot" style="width:320px;margin-left:auto"><tr><td>Subtotal</td><td class="r">AED ${qv.subtotal.toFixed(2)}</td></tr>
     <tr><td>VAT 5%</td><td class="r">AED ${qv.vat.toFixed(2)}</td></tr><tr class="g"><td>Total</td><td class="r">AED ${qv.total.toFixed(2)}</td></tr></table>
     ${qv.notes ? `<div class="box"><h4>Notes</h4>${h(qv.notes)}</div>` : ''}
-    <div class="foot">Prices in AED, VAT 5% included in total. Every completed visit is verified with a GPS-stamped live photo, visible in your customer portal. Quotation valid until ${h(qv.valid_until || '—')}.</div>`,
+    <div class="foot">Prices in AED, VAT 5% included in total. Every completed visit is verified with a GPS-stamped live photo, visible in your customer portal. Quotation valid until ${h(dmy(qv.valid_until))} (DD/MM/YYYY).</div>`,
   accept, !!opts.print);
 }
 function invoiceHtml(iv, autoPrint) {
   const pays = q.all(`SELECT * FROM payments WHERE invoice_id=? ORDER BY received_at`, iv.id);
   return docShell(`Invoice ${iv.number}`, `
-    ${brandHeader('TAX INVOICE', iv.number, [`Period: ${h(iv.period)}`, `Issued: ${String(iv.created_at).slice(0, 10)}`, `Due: <b>${h(iv.due_date)}</b>`, `<span class="pill">${h(iv.status_label)}</span>`])}
+    ${brandHeader('TAX INVOICE', iv.number, [`Period: ${h(iv.period.slice(5) + '/' + iv.period.slice(0, 4))}`, `Issued: ${dmy(iv.created_at)}`, `Due: <b>${h(dmy(iv.due_date))}</b>`, `<span class="pill">${h(iv.status_label)}</span>`])}
     <div class="box"><h4>Bill to</h4><b>${h(iv.customer?.name)}</b> ${h(iv.customer?.branch || '')}<br>${h(iv.customer?.contact_phone || '')}</div>
     <table><tr><th>Date</th><th>Site</th><th>Service</th><th>Job #</th><th class="r">AED</th></tr>
-    ${iv.lines.map(l => `<tr><td>${h(l.date)}</td><td>${h(l.site)}</td><td>${h(l.service)}</td><td>${l.job_id}</td><td class="r">${Number(l.amount).toFixed(2)}</td></tr>`).join('')}</table>
+    ${iv.lines.map(l => `<tr><td>${h(dmy(l.date))}</td><td>${h(l.site)}</td><td>${h(l.service)}</td><td>${l.job_id}</td><td class="r">${Number(l.amount).toFixed(2)}</td></tr>`).join('')}</table>
     <table class="tot" style="width:320px;margin-left:auto"><tr><td>Subtotal</td><td class="r">${iv.subtotal.toFixed(2)}</td></tr><tr><td>VAT 5%</td><td class="r">${iv.vat.toFixed(2)}</td></tr>
     <tr class="g"><td>Total</td><td class="r">AED ${iv.amount.toFixed(2)}</td></tr><tr><td>Paid</td><td class="r">${iv.paid.toFixed(2)}</td></tr><tr><td><b>Balance</b></td><td class="r"><b>AED ${iv.balance.toFixed(2)}</b></td></tr></table>
-    ${pays.length ? `<table><tr><th>Payment</th><th>Method</th><th>Reference</th><th class="r">AED</th></tr>${pays.map(p => `<tr><td>${String(p.received_at).slice(0, 10)}</td><td>${h(p.method)}</td><td>${h(p.reference || '')}</td><td class="r">${p.amount.toFixed(2)}</td></tr>`).join('')}</table>` : ''}
+    ${pays.length ? `<table><tr><th>Payment</th><th>Method</th><th>Reference</th><th class="r">AED</th></tr>${pays.map(p => `<tr><td>${dmy(p.received_at)}</td><td>${h(p.method)}</td><td>${h(p.reference || '')}</td><td class="r">${p.amount.toFixed(2)}</td></tr>`).join('')}</table>` : ''}
     <div class="foot">Invoice covers completed, photo-verified visits only. "Not picked up" visits confirmed by the customer are not billed.</div>`, '', autoPrint);
 }
 
@@ -615,14 +689,24 @@ function mountV3Routes(r, io) {
     if (!l) return res.status(404).json({ error: 'Not found' });
     res.json({ ...l, sites: J(l.sites, []), quotations: q.all(`SELECT * FROM quotations WHERE lead_id=? ORDER BY id DESC`, l.id).map(quoteView) });
   });
+  // Lead field checks shared by create and update.
+  function leadError(b) {
+    if (String(b.contact || '').length > 120) return 'Contact name is too long (max 120 characters)';
+    if (String(b.company || '').length > 160) return 'Company name is too long (max 160 characters)';
+    if (b.phone && !security.isPhone(b.phone)) return 'Phone number looks wrong — use digits, e.g. +971 50 123 4567';
+    if (b.email && !security.isEmail(b.email)) return 'Email address looks wrong';
+    if (Array.isArray(b.sites) && b.sites.length > 50) return 'Too many sites on one lead (max 50)';
+    return null;
+  }
   r.post('/leads', staff, (req, res) => {
     const b = req.body || {};
     if (!b.contact || !(b.phone || b.email)) return res.status(400).json({ error: 'Contact name and a phone or email are required' });
+    const lErr = leadError(b); if (lErr) return res.status(400).json({ error: lErr });
     const info = q.run(`INSERT INTO leads(contact,company,phone,email,service_type,sites,frequency,source,stage,owner_id,follow_up_at,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       b.contact, b.company || '', b.phone || '', b.email || '', b.service_type || 'WASTE', JSON.stringify(b.sites || []), b.frequency || '',
       b.source || 'other', 'new', b.owner_id || req.user.id, b.follow_up_at || null, b.notes || '');
     audit(req, 'lead', info.lastInsertRowid, 'create', null, b);
-    io.emit('lead:changed', {});
+    io.to('staff').emit('lead:changed', {});
     res.json({ ok: true, id: Number(info.lastInsertRowid) });
   });
   r.put('/leads/:id', staff, (req, res) => {
@@ -630,12 +714,13 @@ function mountV3Routes(r, io) {
     if (!l) return res.status(404).json({ error: 'Not found' });
     const b = { ...l, ...req.body };
     if (!STAGES.includes(b.stage)) return res.status(400).json({ error: 'Invalid stage' });
+    const lErr = leadError(req.body || {}); if (lErr) return res.status(400).json({ error: lErr });
     if (b.stage === 'won' && l.stage !== 'won' && !l.customer_id) return res.status(400).json({ error: 'A lead becomes Won by converting an accepted quotation' });
     q.run(`UPDATE leads SET contact=?,company=?,phone=?,email=?,service_type=?,sites=?,frequency=?,source=?,stage=?,lost_reason=?,owner_id=?,follow_up_at=?,notes=?,updated_at=datetime('now') WHERE id=?`,
       b.contact, b.company, b.phone, b.email, b.service_type, JSON.stringify(Array.isArray(b.sites) ? b.sites : J(b.sites, [])), b.frequency, b.source,
       b.stage, b.lost_reason || null, b.owner_id, b.follow_up_at || null, b.notes, l.id);
     audit(req, 'lead', l.id, 'update', l, req.body);
-    io.emit('lead:changed', {});
+    io.to('staff').emit('lead:changed', {});
     res.json({ ok: true });
   });
 
@@ -654,7 +739,9 @@ function mountV3Routes(r, io) {
     const plan = b.plan || {};
     const err = validateRule(plan.recurrence);
     if (err) return { err };
-    if (plan.time_window && !WIN_RX.test(plan.time_window)) return { err: 'time_window must look like 07:00-12:00' };
+    if (plan.time_window && !WIN_RX.test(plan.time_window)) return { err: security.windowError(plan.time_window) };
+    if (plan.start_date && !security.isRealDate(plan.start_date)) return { err: 'Plan start date is not a valid date' };
+    if (plan.end_date && (!security.isRealDate(plan.end_date) || (plan.start_date && plan.end_date < plan.start_date))) return { err: 'Plan end date is invalid or before the start date' };
     return { plan: { recurrence: plan.recurrence, time_window: plan.time_window || getSetting('default_time_window', '07:00-12:00'),
       start_date: plan.start_date || null, end_date: plan.end_date || null, billing: plan.billing === 'per_visit' ? 'per_visit' : 'monthly' } };
   }
@@ -662,6 +749,7 @@ function mountV3Routes(r, io) {
     const b = req.body || {};
     const lead = q.get(`SELECT * FROM leads WHERE id=?`, b.lead_id);
     if (!lead) return res.status(400).json({ error: 'lead_id required' });
+    const iErr = quoteItemsError(b.items); if (iErr) return res.status(400).json({ error: iErr });
     const calc = calcQuote(b.items);
     if (!calc.items.length || calc.total <= 0) return res.status(400).json({ error: 'Add at least one priced line item' });
     const pp = planFromBody(b); if (pp.err) return res.status(400).json({ error: pp.err });
@@ -697,20 +785,52 @@ function mountV3Routes(r, io) {
     if (!qv) return res.status(404).send('Not found');
     res.type('html').send(quoteHtml(qv, { print: req.query.print === '1' }));
   });
-  // share via WhatsApp (wa.me link + public link) — logs sent time
-  r.post('/quotations/:id/send', staff, (req, res) => {
+  // STEP 1 — send the quotation by Gmail (free). WhatsApp stays available as a manual fallback.
+  //   via: 'gmail' (default) | 'whatsapp' | 'pdf'
+  r.post('/quotations/:id/send', staff, async (req, res) => {
     const qv = quoteView(q.get(`SELECT * FROM quotations WHERE id=?`, req.params.id));
     if (!qv) return res.status(404).json({ error: 'Not found' });
+    if (!['draft', 'sent'].includes(qv.status)) return res.status(409).json({ error: `This quotation is ${qv.status} and can no longer be sent` });
     const base = (req.body && req.body.base_url) || `${req.protocol}://${req.get('host')}`;
     const link = `${base}/q/${qv.share_token}`;
     const lead = qv.lead || {};
     const text = `Hello ${lead.contact || ''}, here is your GreenLoop quotation ${qv.number} (v${qv.version}).\n` +
       qv.items.map(i => `• ${i.description || i.service_code}${i.site ? ' — ' + i.site : ''}: ${i.qty} × AED ${i.unit_price}`).join('\n') +
-      `\nTotal incl. VAT 5%: AED ${qv.total.toFixed(2)} · valid until ${qv.valid_until}.\nView / download PDF & accept: ${link}`;
-    const via = req.body?.via === 'pdf' ? 'pdf' : 'whatsapp';
-    q.run(`UPDATE quotations SET status=CASE WHEN status='draft' THEN 'sent' ELSE status END, sent_via=?, sent_at=datetime('now') WHERE id=?`, via, qv.id);
-    audit(req, 'quotation', qv.id, 'sent via ' + via, null, { link });
-    res.json({ ok: true, link, whatsapp_url: waLink(lead.phone, text), text });
+      `\nTotal incl. VAT 5%: AED ${qv.total.toFixed(2)} · valid until ${dmy(qv.valid_until)}.\nView / download PDF & accept: ${link}`;
+    const via = ['whatsapp', 'pdf'].includes(req.body?.via) ? req.body.via : 'gmail';
+    const markSent = (how, to) => {
+      q.run(`UPDATE quotations SET status=CASE WHEN status='draft' THEN 'sent' ELSE status END, sent_via=?, sent_to=?, sent_at=datetime('now') WHERE id=?`, how, to || null, qv.id);
+      if (lead.id) q.run(`UPDATE leads SET stage=CASE WHEN stage IN ('new','contacted','qualified') THEN 'quoted' ELSE stage END, updated_at=datetime('now') WHERE id=?`, lead.id);
+      audit(req, 'quotation', qv.id, 'sent via ' + how, null, { link, to: to || null });
+    };
+    if (via !== 'gmail') {
+      markSent(via, via === 'whatsapp' ? lead.phone : null);
+      return res.json({ ok: true, via, link, whatsapp_url: waLink(lead.phone, text), text });
+    }
+    const to = String(req.body?.to || lead.email || '').trim();
+    if (!mailer.isEmail(to)) return res.status(400).json({ error: 'This lead has no email address. Add one to the lead (or type it here) to send by Gmail.', code: 'NO_EMAIL' });
+    const subject = `GreenLoop quotation ${qv.number} (v${qv.version}) — AED ${qv.total.toFixed(2)}`;
+    const mail = { to, subject, text, html: quoteEmailHtml(qv, link), replyTo: getSetting('company_email', '') };
+    const st = mailer.status();
+    if (!st.configured) {
+      // Gmail not connected on the server yet → hand the user a pre-filled Gmail compose window
+      markSent('gmail', to);
+      return res.json({ ok: true, via: 'gmail', delivery: 'compose', to, link, gmail_compose_url: mailer.composeUrl(mail), text });
+    }
+    try {
+      await mailer.send(mail);
+      markSent('gmail', to);
+      res.json({ ok: true, via: 'gmail', delivery: 'sent', to, link, from: st.sender });
+    } catch (e) {
+      // nothing is marked as sent when the email did not go out
+      res.status(e.status || 502).json({ error: `Email not sent: ${e.message}`, gmail_compose_url: mailer.composeUrl(mail) });
+    }
+  });
+  r.get('/mail/status', staff, (req, res) => res.json(mailer.status()));
+  r.post('/mail/test', owner, async (req, res) => {
+    const to = String(req.body?.to || '').trim();
+    try { await mailer.send({ to, subject: 'GreenLoop — Gmail connection test', text: 'Gmail is connected. Quotations will be sent from this address.' }); res.json({ ok: true, to }); }
+    catch (e) { res.status(e.status || 502).json({ error: e.message }); }
   });
 
   // ── Convert accepted quote → customer (CRM-12) ──
@@ -752,10 +872,17 @@ function mountV3Routes(r, io) {
     created.forEach(c => { jobs += generatePlans({ planId: c.plan_id }).created; });
     audit(req, 'quotation', qv.id, 'convert → customer', null, { account_id: accountId, sites: sites.length, plans: created.length, jobs });
     const portal = `${req.protocol}://${req.get('host')}/customer/`;
-    const msg = `Welcome to GreenLoop, ${lead.contact}! Your customer portal: ${portal}\nStore code: ${code}\nYou can also sign in with a one-time code sent to ${lead.phone || lead.email}.`;
-    io.emit('ledger:refresh', {});
+    const msg = `Welcome to GreenLoop, ${lead.contact}! Your customer app: ${portal}\nSign in with your mobile number ${lead.phone || ''} and store code: ${code}\nYou can also sign in with a one-time code sent to ${lead.phone || lead.email}.\nTurn on notifications in the app — your invoices (with PDF), visit proof and reminders arrive there.`;
+    io.to('staff').emit('ledger:refresh', {});
+    // STEP 2 — registration: the app is waiting with a welcome message, access goes out by Gmail
+    notifyCustomer(accountId, 'welcome', 'Welcome to GreenLoop', 'Your account is ready. Invoices, visit proof and reminders will arrive here — turn on notifications so you never miss one.', '/customer/');
+    const welcome = { to: lead.email, subject: 'Welcome to GreenLoop — your customer app access', text: msg, replyTo: getSetting('company_email', '') };
+    let email = { sent: false, to: lead.email || null, gmail_compose_url: mailer.isEmail(lead.email) ? mailer.composeUrl(welcome) : null };
+    if (mailer.isEmail(lead.email) && mailer.status().configured) {
+      try { await mailer.send(welcome); email.sent = true; } catch (e) { email.error = e.message; }
+    }
     res.json({ ok: true, customer_id: accountId, sites: sites.length, plans: created.length, jobs_generated: jobs,
-      portal_code: code, portal_url: portal, whatsapp_url: waLink(lead.phone, msg) });
+      portal_code: code, portal_url: portal, email, whatsapp_url: waLink(lead.phone, msg) });
   });
 
   // ── Pipeline dashboard (CRM-16) ──
@@ -789,8 +916,10 @@ function mountV3Routes(r, io) {
   function upsertPlan(req, res, customerId, existing) {
     const b = { ...(existing ? { ...existing, recurrence: J(existing.recurrence, {}) } : {}), ...(req.body || {}) };
     const err = validateRule(b.recurrence); if (err) return res.status(400).json({ error: err });
-    if (b.time_window && !WIN_RX.test(b.time_window)) return res.status(400).json({ error: 'time_window must look like 07:00-12:00' });
+    if (b.time_window && !WIN_RX.test(b.time_window)) return res.status(400).json({ error: security.windowError(b.time_window) });
     if (!b.start_date) b.start_date = ymd();
+    if (!security.isRealDate(b.start_date)) return res.status(400).json({ error: 'Start date is not a valid date' });
+    if (b.end_date && !security.isRealDate(b.end_date)) return res.status(400).json({ error: 'End date is not a valid date' });
     if (b.end_date && b.end_date < b.start_date) return res.status(400).json({ error: 'End date is before start date' });
     const st = q.get(`SELECT * FROM service_types WHERE code=?`, b.service_code || 'WASTE');
     if (!st) return res.status(400).json({ error: 'Unknown service type' });
@@ -807,7 +936,7 @@ function mountV3Routes(r, io) {
     }
     const out = regeneratePlan(id);
     audit(req, 'service_plan', id, existing ? 'update' : 'create', existing, b);
-    io.emit('ledger:refresh', {});
+    io.to('staff').emit('ledger:refresh', {});
     return res.json({ ok: true, id, ...out });
   }
   r.post('/service-plans', staff, (req, res) => {
@@ -827,25 +956,26 @@ function mountV3Routes(r, io) {
     const { customer_id, date, vehicle_id, service_code, time_window } = req.body || {};
     const c = q.get(`SELECT * FROM customers WHERE id=? AND is_active=1`, customer_id);
     if (!c) return res.status(400).json({ error: 'Choose an active client' });
-    if (!date || date < ymd()) return res.status(400).json({ error: 'Date cannot be in the past' });
-    if (time_window && !WIN_RX.test(time_window)) return res.status(400).json({ error: 'Bad time window' });
+    const dErr = security.dateInRange(date, { futureDays: 366 }); if (dErr) return res.status(400).json({ error: dErr });
+    if (time_window && !WIN_RX.test(time_window)) return res.status(400).json({ error: security.windowError(time_window) });
     if (q.get(`SELECT id FROM pickups WHERE customer_id=? AND scheduled_date=? AND status IN ('pending','overdue','collected') AND COALESCE(service_type,'WASTE')=?`, c.id, date, service_code || 'WASTE'))
       return res.status(409).json({ error: 'This client already has this service on that date' });
     if (vehicle_id) {
       const v = q.get(`SELECT * FROM vehicles WHERE id=? AND is_active=1`, vehicle_id);
       if (!v) return res.status(400).json({ error: 'Vehicle not found' });
-      if (loadOf(v.id, date) >= v.max_daily_capacity) return res.status(409).json({ error: `${v.fleet_number} is full on ${date}` });
+      if (loadOf(v.id, date) >= capacityFor(v, date)) return res.status(409).json({ error: `${v.fleet_number} is full on ${date}` });
       const drv = q.get(`SELECT id FROM users WHERE role='driver' AND is_active=1 AND vehicle_id=? LIMIT 1`, v.id);
       const info = q.run(`INSERT INTO pickups(customer_id,vehicle_id,driver_id,scheduled_date,seq,status,service_type,time_window) VALUES (?,?,?,?,999,'pending',?,?)`,
         c.id, v.id, drv ? drv.id : null, date, service_code || 'WASTE', time_window || c.time_window || getSetting('default_time_window', '07:00-12:00'));
       resequence(v.id, date);
       audit(req, 'pickup', info.lastInsertRowid, 'ad-hoc create', null, req.body);
-      io.emit('ledger:refresh', { date }); io.emit('driver:queue-updated', { vehicle_id: v.id, date });
+      io.to('staff').emit('ledger:refresh', { date }); io.to('staff').emit('driver:queue-updated', { vehicle_id: v.id, date });
+      notifyVehicleDrivers(v.id, 'New stop added', `${c.name}${c.branch ? ' · ' + c.branch : ''} on ${dmy(date)}`);
       return res.json({ ok: true, id: Number(info.lastInsertRowid), vehicle: v.fleet_number });
     }
     const out = createJob({ customer: c, date, serviceCode: service_code, window: time_window });
     audit(req, 'pickup', out.id, 'ad-hoc create (auto-allocated)', null, req.body);
-    io.emit('ledger:refresh', { date });
+    io.to('staff').emit('ledger:refresh', { date });
     res.json({ ok: true, ...out });
   });
 
@@ -857,7 +987,7 @@ function mountV3Routes(r, io) {
     if (req.body?.approve) {
       const c = q.get(`SELECT * FROM customers WHERE id=?`, b.customer_id);
       const date = req.body.date || b.date;
-      if (date < ymd()) return res.status(400).json({ error: 'Date is in the past' });
+      const dErr = security.dateInRange(date, { futureDays: 366 }); if (dErr) return res.status(400).json({ error: dErr });
       const out = createJob({ customer: c, date, serviceCode: b.service_code, window: b.time_window });
       q.run(`UPDATE bookings SET status='confirmed', pickup_id=?, date=? WHERE id=?`, out.id, date, b.id);
       notifyCustomer(b.customer_id, 'booking', 'Booking confirmed', `Extra visit confirmed for ${date}${out.vehicle ? ' · ' + out.vehicle : ''}`);
@@ -866,7 +996,7 @@ function mountV3Routes(r, io) {
       notifyCustomer(b.customer_id, 'booking', 'Booking not possible', `We could not schedule ${b.date}. ${req.body?.reason || 'Our team will call you.'}`);
     }
     audit(req, 'booking', b.id, req.body?.approve ? 'confirm' : 'decline', b, req.body);
-    io.emit('ledger:refresh', {});
+    io.to('staff').emit('ledger:refresh', {});
     res.json({ ok: true });
   });
 
@@ -891,6 +1021,20 @@ function mountV3Routes(r, io) {
     if (!inv) return res.status(404).send('Not found');
     if (req.user.eff === 'customer' && accountOf(custId(req)) !== inv.customer_id) return res.status(403).send('Forbidden');
     res.type('html').send(invoiceHtml(invoiceView(inv), req.query.print === '1'));
+  });
+  // STEP 3 — (re)send an invoice to the customer app: in-app inbox + push, link opens the PDF
+  r.post('/invoices/:id/send', owner, async (req, res) => {
+    const inv = q.get(`SELECT * FROM invoices WHERE id=?`, req.params.id);
+    if (!inv) return res.status(404).json({ error: 'Not found' });
+    if (inv.status === 'void') return res.status(409).json({ error: 'A void invoice cannot be sent' });
+    const v = invoiceView(inv);
+    const body = v.balance > 0.004
+      ? `AED ${v.balance.toFixed(2)} due ${dmy(inv.due_date)} — tap to view the PDF`
+      : `AED ${inv.amount.toFixed(2)} — paid in full. Tap to view the PDF`;
+    const pushed = await notifyCustomer(inv.customer_id, 'invoice', `Invoice ${inv.number}`, body, '/customer/#invoices');
+    q.run(`UPDATE invoices SET sent_at=datetime('now'), sent_count=COALESCE(sent_count,0)+1 WHERE id=?`, inv.id);
+    audit(req, 'invoice', inv.id, 'sent to customer app', null, { devices: pushed.devices, delivered: pushed.delivered });
+    res.json({ ok: true, in_app: true, push: pushed });
   });
   r.post('/invoices/:id/void', owner, (req, res) => {
     const inv = q.get(`SELECT * FROM invoices WHERE id=?`, req.params.id);
@@ -953,7 +1097,7 @@ function mountV3Routes(r, io) {
     const code = await uniquePortalCode();
     q.run(`UPDATE customers SET portal_code_hash=? WHERE id=?`, bcrypt.hashSync(code, 10), c.account_id || c.id);
     audit(req, 'customer', c.id, 'reset portal code', null, null);
-    res.json({ ok: true, portal_code: code, whatsapp_url: waLink(c.contact_phone, `Your GreenLoop portal code is ${code}`) });
+    res.json({ ok: true, portal_code: code, whatsapp_url: waLink(c.contact_phone, `Your GreenLoop portal code is ${code}. Sign in at the customer app with this mobile number and the code.`) });
   });
 
   // ── Not picked up: confirmation (CUS-10) + override ──
@@ -987,7 +1131,7 @@ function mountV3Routes(r, io) {
       q.run(`INSERT INTO alerts(type,severity,message,pickup_id) VALUES ('RESCHEDULED','warning',?,?)`, `No-pickup marked as RESCHEDULED`, p.id);
       alertCrm('DISPUTE', 'critical', `DISPUTE: ${c.name} (${c.branch || ''}) says job #${p.id} on ${p.scheduled_date} was not a valid no-pickup. ${note ? '“' + note + '” ' : ''}${out ? 'Free revisit booked #' + out.id : 'No capacity for revisit — schedule manually.'}`, p.id);
       notifyCustomer(c.id, 'revisit', 'Free revisit booked', out ? `We will come back — job #${out.id}` : 'Our team will call you to arrange a revisit.');
-      if (IO) IO.emit('ledger:refresh', {});
+      if (IO) IO.to('staff').emit('ledger:refresh', {});
       return { ok: true, status: 'Disputed — free revisit', revisit_id: out ? out.id : null };
     }
     return { code: 400, error: 'action must be confirm or dispute' };
@@ -1016,7 +1160,7 @@ function mountV3Routes(r, io) {
       JSON.stringify({ ...meta, overridden: true, override_reason: reason, override_by: req.user.name }), ` [ops override: ${reason}]`, p.id);
     audit(req, 'pickup', p.id, 'proof override → collected', meta, { reason });
     onPickupCompleted(p.id);
-    io.emit('ledger:refresh', {});
+    io.to('staff').emit('ledger:refresh', {});
     res.json({ ok: true });
   });
   r.get('/attention', staff, (req, res) => {
@@ -1029,7 +1173,18 @@ function mountV3Routes(r, io) {
     const ent = req.query.entity ? String(req.query.entity) : null;
     res.json(ent ? q.all(`SELECT * FROM audit_log WHERE entity=? ORDER BY id DESC LIMIT 300`, ent) : q.all(`SELECT * FROM audit_log ORDER BY id DESC LIMIT 300`));
   });
-  r.get('/me', staff, (req, res) => res.json({ id: req.user.id, name: req.user.name, crm_role: req.user.eff }));
+  // weak_password: this account still uses the seeded demo password → CRM shows a warning.
+  const weakPw = new Map();   // user id → { hash, weak } (bcrypt is slow; recheck only when the hash changes)
+  r.get('/me', staff, (req, res) => {
+    const u = q.get(`SELECT id, password_hash FROM users WHERE id=?`, req.user.id);
+    let weak = false;
+    if (u && u.password_hash) {
+      const c = weakPw.get(u.id);
+      if (c && c.hash === u.password_hash) weak = c.weak;
+      else { weak = ['admin123', 'admin', 'password', 'greenloop'].some((p) => bcrypt.compareSync(p, u.password_hash)); weakPw.set(u.id, { hash: u.password_hash, weak }); }
+    }
+    res.json({ id: req.user.id, name: req.user.name, crm_role: req.user.eff, weak_password: weak });
+  });
   r.put('/users/:id/crm-role', owner, (req, res) => {
     const role = req.body?.crm_role === 'ops' ? 'ops' : 'owner';
     const u = q.get(`SELECT * FROM users WHERE id=? AND role='admin'`, req.params.id);
@@ -1041,13 +1196,14 @@ function mountV3Routes(r, io) {
   });
   r.get('/v3/settings', owner, (req, res) => res.json({
     uae_holidays: J(getSetting('uae_holidays', '[]'), []), default_time_window: getSetting('default_time_window'),
-    invoice_due_days: getSetting('invoice_due_days'), company_whatsapp: getSetting('company_whatsapp'), shift_cutoff: getSetting('shift_cutoff', '12:00') }));
+    invoice_due_days: getSetting('invoice_due_days'), company_whatsapp: getSetting('company_whatsapp'), company_email: getSetting('company_email', ''), mail: mailer.status(), shift_cutoff: getSetting('shift_cutoff', '12:00') }));
   r.put('/v3/settings', owner, (req, res) => {
     const b = req.body || {};
     if (b.uae_holidays) setSetting('uae_holidays', JSON.stringify(b.uae_holidays.filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))));
     if (b.default_time_window && WIN_RX.test(b.default_time_window)) setSetting('default_time_window', b.default_time_window);
     if (b.invoice_due_days) setSetting('invoice_due_days', String(Number(b.invoice_due_days) || 15));
     if (b.company_whatsapp) setSetting('company_whatsapp', b.company_whatsapp);
+    if (b.company_email !== undefined) { if (b.company_email && !mailer.isEmail(b.company_email)) return res.status(400).json({ error: 'Company email is not a valid address' }); setSetting('company_email', b.company_email || ''); }
     if (b.shift_cutoff && /^\d{2}:\d{2}$/.test(b.shift_cutoff)) setSetting('shift_cutoff', b.shift_cutoff);
     audit(req, 'settings', null, 'update', null, b);
     res.json({ ok: true });
@@ -1075,7 +1231,7 @@ function mountV3Routes(r, io) {
       q.run(`UPDATE quotations SET status='accepted', accepted_at=datetime('now') WHERE id=?`, qt.id);
       audit(null, 'quotation', qt.id, 'accepted by customer (link)', null, null);
       alertCrm('QUOTE_ACCEPTED', 'info', `Quotation ${qt.number} v${qt.version} accepted by ${qv.lead?.company || qv.lead?.contact} — convert to customer in Quotations.`);
-      io.emit('lead:changed', {});
+      io.to('staff').emit('lead:changed', {});
     }
     res.type('html').send(docShell('Accepted', `${brandHeader('THANK YOU', qt.number, [])}<h2>Quotation accepted ✓</h2><p>Our team will set up your service plan and send your customer-portal access shortly.</p>`));
   });
@@ -1159,7 +1315,8 @@ function mountV3Routes(r, io) {
   r.get('/customer/bookings', cust, (req, res) => res.json(q.all(`SELECT * FROM bookings WHERE customer_id=? ORDER BY id DESC LIMIT 30`, custId(req))));
   r.post('/customer/bookings', cust, (req, res) => {
     const b = req.body || {};
-    if (!b.date || b.date < ymd()) return res.status(400).json({ error: 'Pick a date from today onwards' });
+    const dErr = security.dateInRange(b.date, { futureDays: 366 }); if (dErr) return res.status(400).json({ error: dErr === 'Date cannot be in the past' ? 'Pick a date from today onwards' : dErr });
+    if (b.time_window && !WIN_RX.test(b.time_window)) return res.status(400).json({ error: security.windowError(b.time_window) });
     if (!q.get(`SELECT 1 x FROM service_types WHERE code=? AND is_active=1`, b.service_code)) return res.status(400).json({ error: 'Pick a service' });
     const info = q.run(`INSERT INTO bookings(customer_id,service_code,date,time_window,notes) VALUES (?,?,?,?,?)`, custId(req), b.service_code, b.date,
       WIN_RX.test(b.time_window || '') ? b.time_window : null, String(b.notes || '').slice(0, 300));
@@ -1271,20 +1428,61 @@ function atRiskCheck() {
     if (mins <= 30 && mins > -600) {
       q.run(`UPDATE pickups SET at_risk_alerted=1 WHERE id=?`, r2.id);
       alertCrm('AT_RISK', 'warning', `At risk of being late: ${r2.name} (${r2.branch || ''}) window ends ${end}, not started.`, r2.id);
-      if (IO) IO.emit('driver:at-risk', { pickup_id: r2.id, driver_id: r2.driver_id, window_end: end });
+      if (IO) IO.to('staff').emit('driver:at-risk', { pickup_id: r2.id, driver_id: r2.driver_id, window_end: end });
       if (push && r2.driver_id) push.sendPush('driver', r2.driver_id, 'Stop at risk', `${r2.name} window ends ${end}`, '/driver/').catch(() => {});
       n++;
     }
   }
   return n;
 }
-function dailyJobs() {
+// Nightly plan generation in batches of 25 plans, each batch in one transaction,
+// yielding to the event loop in between so the app stays responsive.
+async function generatePlansBatched({ days = 14, batch = 25 } = {}) {
+  const ids = q.all(`SELECT id FROM service_plans WHERE status='active' ORDER BY id`).map((r) => r.id);
+  let created = 0, skipped = 0;
+  for (let i = 0; i < ids.length; i += batch) {
+    q.run('BEGIN');
+    try {
+      for (const id of ids.slice(i, i + batch)) { const g = generatePlans({ days, planId: id }); created += g.created || 0; skipped += g.skipped || 0; }
+      q.run('COMMIT');
+    } catch (e) { try { q.run('ROLLBACK'); } catch {} throw e; }
+    await new Promise((r) => setImmediate(r));
+  }
+  return { created, skipped, plans: ids.length };
+}
+
+// Daily SQLite backup (VACUUM INTO) kept for BACKUP_DAYS days next to the database.
+function dailyBackup() {
+  const dbPath = process.env.DB_PATH;
+  if (!dbPath || process.env.BACKUP_DISABLED === '1') return;
+  const path = require('path'), fs = require('fs');
+  const dir = process.env.BACKUP_DIR || path.join(path.dirname(dbPath), 'backups');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `greenloop-${ymd()}.sqlite`);
+    if (!fs.existsSync(file)) { q.run('VACUUM INTO ?', file); console.log('✔ Backup written', file); }
+    const keep = Number(process.env.BACKUP_DAYS || 14);
+    fs.readdirSync(dir).filter((f) => /^greenloop-\d{4}-\d{2}-\d{2}\.sqlite$/.test(f)).sort().slice(0, -keep)
+      .forEach((f) => fs.rmSync(path.join(dir, f), { force: true }));
+  } catch (e) { console.warn('Backup failed:', e.message); }
+}
+
+let dailyRunning = false;
+async function dailyJobs() {
+  if (dailyRunning) return;
+  dailyRunning = true;
+  try { await dailyJobsInner(); } finally { dailyRunning = false; }
+}
+async function dailyJobsInner() {
   const today = ymd();
   if (getSetting('v3_last_generate', '') !== today) {
-    try { const g = generatePlans({ days: 14 }); console.log(`✔ Recurrence engine: ${g.created} jobs generated, ${g.skipped} holiday skips`); } catch (e) { console.warn('generatePlans', e.message); }
     setSetting('v3_last_generate', today);
+    try { const g = await generatePlansBatched({ days: 14 }); console.log(`✔ Recurrence engine: ${g.created} jobs generated for ${g.plans} plans, ${g.skipped} holiday skips`); }
+    catch (e) { console.warn('generatePlans', e.message); setSetting('v3_last_generate', ''); }
   }
-  const hour = new Date().getHours();
+  if (getSetting('v3_last_backup', '') !== today) { setSetting('v3_last_backup', today); dailyBackup(); }
+  // reminders go out at 17:00 UAE time (server clocks run on UTC)
+  const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: process.env.APP_TZ || 'Asia/Dubai', hour: '2-digit', hourCycle: 'h23' }).format(new Date()));
   if (hour >= 17 && getSetting('v3_last_reminder', '') !== today) {
     const tmr = addDays(today, 1);
     q.all(`SELECT DISTINCT p.customer_id, p.time_window, c.name FROM pickups p JOIN customers c ON c.id=p.customer_id WHERE p.scheduled_date=? AND p.status='pending'`, tmr)
@@ -1314,7 +1512,10 @@ function seedDemo() {
 function start(io) {
   IO = io;
   try { seedDemo(); } catch (e) { console.warn('v3 demo seed', e.message); }
-  const tick = () => { try { autoConfirm(); atRiskCheck(); dailyJobs(); } catch (e) { console.warn('v3 tick', e.message); } };
+  const tick = () => {
+    try { autoConfirm(); atRiskCheck(); } catch (e) { console.warn('v3 tick', e.message); }
+    dailyJobs().catch((e) => console.warn('v3 daily', e.message));
+  };
   tick();
   setInterval(tick, 60_000);
 }
@@ -1322,6 +1523,7 @@ function start(io) {
 ensureSchema();
 
 module.exports = {
-  mountV3Routes, guard, start, validateProof, rejectProof, onPickupCompleted, onNotPickedUp, notifyCustomer,
+  mountV3Routes, guard, start, validateProof, rejectProof, onPickupCompleted, onNotPickedUp, notifyCustomer, notifyVehicleDrivers, dmy,
   generatePlans, occursOn, describeRule, calcQuote, haversineM, autoConfirm, atRiskCheck, allocate,
+  alertCrm, flagLateProof, generatePlansBatched, dailyBackup, dailyJobs,
 };
