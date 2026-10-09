@@ -3,8 +3,8 @@
   "short_name": "Store Portal",
   "start_url": "/customer/",
   "display": "standalone",
-  "background_color": "#0e1418",
-  "theme_color": "#0f766e",
+  "background_color": "#07131d",
+  "theme_color": "#07131d",
   "orientation": "portrait",
   "icons": [
     {

@@ -644,7 +644,7 @@ td{padding:9px;border-bottom:1px solid #e5e7eb}.r{text-align:right}.tot td{borde
 .bar{max-width:820px;margin:16px auto 0;display:flex;gap:8px;justify-content:flex-end}.bar button,.bar a{background:#0f766e;color:#fff;border:0;border-radius:10px;padding:10px 16px;font-weight:700;cursor:pointer;text-decoration:none}
 .bar .ghost{background:#fff;color:#0f766e;border:1px solid #99f6e4}img.ph{width:90px;height:68px;object-fit:cover;border-radius:6px}
 @media print{body{background:#fff}.page{box-shadow:none;margin:0;border-radius:0}.bar{display:none}}`;
-const LOGO = `<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#14b8a6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg>`;
+const LOGO = `<svg viewBox="0 0 64 64" width="34" height="34" aria-hidden="true"><defs><linearGradient id="glgDoc" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3CF2B4"/><stop offset="1" stop-color="#0FB5A6"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#glgDoc)"/><path d="M44.5 36A14.5 14.5 0 1 1 30 21.5" fill="none" stroke="#062A24" stroke-width="6.5" stroke-linecap="round"/><path d="M29 24C29 14.5 37 10 48.5 11C49.5 22.5 44 30 34.5 29Z" fill="#fff"/></svg>`;
 const h = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function docShell(title, body, extraBar = '', autoPrint = false) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${h(title)}</title><style>${DOC_CSS}</style></head>
@@ -693,7 +693,7 @@ td .sub{display:block;font-size:12.5px;color:#55645f}
   .sum{width:100%}}
 @media print{body{background:#fff}.bar{display:none}.sheet{box-shadow:none;margin:0;max-width:none;padding:24px 8px}}
 body.embed{background:#fff}body.embed .bar{display:none}body.embed .sheet{box-shadow:none;margin:0 auto;padding:36px 36px 28px}`;
-const QUOTE_MARK = `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="#0f766e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg>`;
+const QUOTE_MARK = `<svg viewBox="0 0 64 64" width="32" height="32" aria-hidden="true"><defs><linearGradient id="glgQ" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3CF2B4"/><stop offset="1" stop-color="#0FB5A6"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#glgQ)"/><path d="M44.5 36A14.5 14.5 0 1 1 30 21.5" fill="none" stroke="#062A24" stroke-width="6.5" stroke-linecap="round"/><path d="M29 24C29 14.5 37 10 48.5 11C49.5 22.5 44 30 34.5 29Z" fill="#fff"/></svg>`;
 const aed = n => Number(n || 0).toLocaleString('en-AE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 // every line priced by frequency → the total is a monthly figure
 const quoteIsMonthly = qv => qv.items.length > 0 && qv.items.every(i => i.freq_unit);

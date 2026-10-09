@@ -197,6 +197,10 @@ Requirements that have not changed: HTTPS in production; on iPhone the app must 
 
 ---
 
+## v3.4: Aura glow-up and new logo
+
+A visual release: same screens and features as v3.3, restyled after the "Aura · Glass & Light" UI kit in GreenLoop's green, with a new logo. Each app loads one extra stylesheet, `aura.css`, after `styles.css` and `fx.css`. The file list is in `docs/CHANGES-v3.4.md`.
+
 ## v3.3 — unique contacts, frequency pricing, quotation preview, driver shift clock
 
 ### What changed for users

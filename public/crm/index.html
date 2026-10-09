@@ -6,13 +6,16 @@
 <title>GreenLoop CRM — Owner Control Center</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="fx.css">
+<link rel="stylesheet" href="aura.css">
+<link rel="icon" type="image/svg+xml" href="/shared/logo.svg">
+<meta name="theme-color" content="#07131d">
 </head>
 <body>
 
 <!-- LOGIN -->
 <div id="login-screen" class="login-wrap">
   <div class="login-card">
-    <div class="logo"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg> <span>GreenLoop</span></div>
+    <div class="logo"><svg viewBox="0 0 64 64" width="40" height="40" aria-hidden="true"><defs><linearGradient id="glgA" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3CF2B4"/><stop offset="1" stop-color="#0FB5A6"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#glgA)"/><path d="M44.5 36A14.5 14.5 0 1 1 30 21.5" fill="none" stroke="#062A24" stroke-width="6.5" stroke-linecap="round"/><path d="M29 24C29 14.5 37 10 48.5 11C49.5 22.5 44 30 34.5 29Z" fill="#fff"/></svg> <span>Green<b>Loop</b></span></div>
     <p class="muted">Owner CRM Control Center</p>
     <input id="login-user" placeholder="Username" autocomplete="username">
     <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password">
@@ -25,7 +28,7 @@
 <!-- APP SHELL (nav icons injected by app.js) -->
 <div id="app" class="hidden">
   <aside class="sidebar">
-    <div class="logo"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg> <span>GreenLoop</span></div>
+    <div class="logo"><svg viewBox="0 0 64 64" width="34" height="34" aria-hidden="true"><defs><linearGradient id="glgB" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3CF2B4"/><stop offset="1" stop-color="#0FB5A6"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#glgB)"/><path d="M44.5 36A14.5 14.5 0 1 1 30 21.5" fill="none" stroke="#062A24" stroke-width="6.5" stroke-linecap="round"/><path d="M29 24C29 14.5 37 10 48.5 11C49.5 22.5 44 30 34.5 29Z" fill="#fff"/></svg> <span>Green<b>Loop</b></span></div>
     <nav id="nav"></nav>
     <div class="sidebar-foot">
       <div style="width:100%"><b id="me-name">—</b> <span id="me-role" class="role-chip">Owner</span></div>

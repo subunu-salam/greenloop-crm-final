@@ -20,7 +20,7 @@
       delay: (ctx) => (ctx.type === 'data' && ctx.mode === 'default') ? ctx.dataIndex * 55 + ctx.datasetIndex * 110 : 0,
     });
     const tt = C.defaults.plugins.tooltip;
-    Object.assign(tt, { backgroundColor: 'rgba(6,40,34,.88)', borderColor: 'rgba(45,212,191,.45)', borderWidth: 1,
+    Object.assign(tt, { backgroundColor: 'rgba(12,26,40,.94)', borderColor: 'rgba(46,230,166,.45)', borderWidth: 1,
       padding: 10, cornerRadius: 10, titleFont: { weight: '700' }, boxPadding: 4, usePointStyle: true });
     C.defaults.elements.arc.hoverOffset = 10;
     C.defaults.elements.line.tension = .38;
