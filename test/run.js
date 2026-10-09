@@ -2,7 +2,7 @@
 // Usage: npm test        (load test: npm run test:load)
 const { spawnSync } = require('child_process');
 const path = require('path');
-const suites = ['regression.test.js', 'edge-cases.test.js', 'v32.test.js', 'v33.test.js'];
+const suites = ['regression.test.js', 'edge-cases.test.js', 'v32.test.js', 'v33.test.js', 'v342.test.js'];
 let failed = 0;
 for (const s of suites) {
   console.log(`\n▶ ${s}`);

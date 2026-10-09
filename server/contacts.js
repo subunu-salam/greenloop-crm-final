@@ -9,18 +9,43 @@
 // ─────────────────────────────────────────────────────────────
 const { q } = require('./db');
 
-// local = digits after the country code; len = allowed lengths; lead = allowed first digits
+// Numbering rules per country (digits after the country code, without the leading 0):
+//   UAE      mobile 9 digits starting 5 (50 123 4567) · landline 8 digits, area code 2,3,4,6,7 or 9 (4 123 4567)
+//   Saudi    mobile 9 digits starting 5 · landline 9 digits starting 1 (11 = Riyadh, 12 = Jeddah …)
+//   Qatar    8 digits · mobile starts 3, 5, 6 or 7 · landline starts 4
+//   Oman     8 digits · mobile starts 7 or 9 · landline starts 2
+//   Kuwait   8 digits · mobile starts 5, 6 or 9 · landline starts 2
+//   Bahrain  8 digits · mobile starts 3 or 6 · landline starts 1 or 7
+// public/shared/phone.js carries the same table for the browser.
 const COUNTRIES = [
-  { cc: '971', name: 'UAE / Dubai', len: [9, 8], lead: { 9: '5', 8: '234679' }, example: '50 123 4567' },
-  { cc: '966', name: 'Saudi Arabia', len: [9], lead: { 9: '15' }, example: '50 123 4567' },
-  { cc: '974', name: 'Qatar', len: [8], lead: { 8: '34567' }, example: '3312 3456' },
-  { cc: '968', name: 'Oman', len: [8], lead: { 8: '279' }, example: '9212 3456' },
-  { cc: '965', name: 'Kuwait', len: [8], lead: { 8: '2569' }, example: '5012 3456' },
-  { cc: '973', name: 'Bahrain', len: [8], lead: { 8: '1367' }, example: '3612 3456' },
+  { cc: '971', name: 'UAE / Dubai', mobile: { len: 9, lead: '5', eg: '50 123 4567' }, landline: { len: 8, lead: '234679', eg: '4 123 4567' } },
+  { cc: '966', name: 'Saudi Arabia', mobile: { len: 9, lead: '5', eg: '50 123 4567' }, landline: { len: 9, lead: '1', eg: '11 123 4567' } },
+  { cc: '974', name: 'Qatar', mobile: { len: 8, lead: '3567', eg: '3312 3456' }, landline: { len: 8, lead: '4', eg: '4412 3456' } },
+  { cc: '968', name: 'Oman', mobile: { len: 8, lead: '79', eg: '9212 3456' }, landline: { len: 8, lead: '2', eg: '2412 3456' } },
+  { cc: '965', name: 'Kuwait', mobile: { len: 8, lead: '569', eg: '5012 3456' }, landline: { len: 8, lead: '2', eg: '2212 3456' } },
+  { cc: '973', name: 'Bahrain', mobile: { len: 8, lead: '36', eg: '3612 3456' }, landline: { len: 8, lead: '17', eg: '1712 3456' } },
 ];
+COUNTRIES.forEach(c => { c.len = [...new Set([c.mobile.len, c.landline.len])]; c.example = c.mobile.eg; });
 const CODES = COUNTRIES.map(c => '+' + c.cc).join(', ');
+const orList = s => { const a = s.split(''); return a.length === 1 ? a[0] : a.slice(0, -1).join(', ') + ' or ' + a[a.length - 1]; };
+// one sentence that states the rule for a country, used in every error so the fix is obvious
+function ruleText(c) {
+  const m = c.mobile, l = c.landline;
+  return `${c.name} mobile numbers have ${m.len} digits and start with ${orList(m.lead)} (e.g. +${c.cc} ${m.eg}). ` +
+    `Landlines have ${l.len} digits and start with ${orList(l.lead)} (e.g. +${c.cc} ${l.eg}).`;
+}
+// digits after the country code → 'mobile' | 'landline' | null
+function kindOf(c, d) {
+  if (d.length === c.mobile.len && c.mobile.lead.includes(d[0])) return 'mobile';
+  if (d.length === c.landline.len && c.landline.lead.includes(d[0])) return 'landline';
+  return null;
+}
+function whyNot(c, d) {
+  if (!c.len.includes(d.length)) return `That number has ${d.length} digit${d.length === 1 ? '' : 's'} after +${c.cc}. ${ruleText(c)}`;
+  return `${d.length === 8 ? 'An' : 'A'} ${d.length}-digit ${c.name} number cannot start with ${d[0]}. ${ruleText(c)}`;
+}
 
-// → { ok, e164, cc, local } or { ok:false, error }
+// → { ok, e164, cc, local, kind } or { ok:false, error }
 function parsePhone(input, defaultCc = '971') {
   let s = String(input ?? '').trim();
   if (!s) return { ok: false, error: 'Enter a mobile number' };
@@ -39,21 +64,22 @@ function parsePhone(input, defaultCc = '971') {
     else country = COUNTRIES.find(c => c.cc === String(defaultCc)) || COUNTRIES[0];
   }
   d = d.replace(/^0+/, '');                       // 050 123 4567 → 50 123 4567
-  if (!country.len.includes(d.length)) {
-    return { ok: false, error: `A ${country.name} number has ${country.len.join(' or ')} digits after +${country.cc} (e.g. +${country.cc} ${country.example})` };
-  }
-  if (!country.lead[d.length].includes(d[0])) return { ok: false, error: `That is not a valid ${country.name} number (e.g. +${country.cc} ${country.example})` };
-  return { ok: true, e164: `+${country.cc}${d}`, cc: country.cc, local: d };
+  const kind = kindOf(country, d);
+  if (!kind) return { ok: false, error: whyNot(country, d) };
+  return { ok: true, e164: `+${country.cc}${d}`, cc: country.cc, local: d, kind };
 }
 const normalizePhone = (input, defaultCc) => { const p = parsePhone(input, defaultCc); return p.ok ? p.e164 : null; };
 
-// "+971501234567" → "+971 50 123 4567"
+// "+971501234567" → "+971 50 123 4567" · "+97141234567" → "+971 4 123 4567" · "+97433123456" → "+974 3312 3456"
+function groupLocal(cc, l) {
+  if (l.length === 9) return `${l.slice(0, 2)} ${l.slice(2, 5)} ${l.slice(5)}`;
+  if (cc === '971' && l.length === 8) return `${l.slice(0, 1)} ${l.slice(1, 4)} ${l.slice(4)}`;
+  return `${l.slice(0, 4)} ${l.slice(4)}`;
+}
 function formatPhone(input) {
   const p = parsePhone(input);
   if (!p.ok) return String(input ?? '');
-  const l = p.local;
-  const body = l.length === 9 ? `${l.slice(0, 2)} ${l.slice(2, 5)} ${l.slice(5)}` : `${l.slice(0, 4)} ${l.slice(4)}`;
-  return `+${p.cc} ${body}`;
+  return `+${p.cc} ${groupLocal(p.cc, p.local)}`;
 }
 
 const EMAIL_RX = /^[a-z0-9._%+-]{1,64}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;

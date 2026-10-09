@@ -160,3 +160,6 @@ button, input, textarea, select { font-family: var(--a-font); }
 .done-flash { background: rgba(7, 19, 29, .92); font-weight: 600; letter-spacing: -.01em; } .done-flash.ok svg { color: var(--a-accent); } .done-flash.bad svg { color: var(--a-danger); }
 .sync-banner { border-radius: 999px; background: rgba(255, 209, 102, .95); font-weight: 600; }
 .empty { font-weight: 400; }
+
+/* v3.4.1: in Arabic and Urdu, phone numbers and plates still read left to right (+971… not …971+) */
+[dir=rtl] .inforow b, [dir=rtl] .vhead span, [dir=rtl] .hdr-sub #hdr-date { direction: ltr; unicode-bidi: isolate; display: inline-block; }

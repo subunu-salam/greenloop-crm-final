@@ -119,3 +119,11 @@ input:focus, select:focus, textarea:focus, .gl-phone select:focus, .gl-phone inp
 .visit .meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; color: var(--a-ink); font-size: 15px; }
 .visit .meta small { color: var(--a-muted); font-size: 12.5px; }
 .visit .st { flex-shrink: 0; box-shadow: 0 0 0 4px rgba(255, 255, 255, .06); }
+
+/* v3.4.1: a name and the line under it no longer run together (plan cards, invoice rows) */
+.plan-top small { display: block; margin-top: 2px; }
+.plan-top > div { min-width: 0; }
+.inv { width: 100%; flex-direction: row; justify-content: space-between; align-items: center; gap: 12px; text-align: left; margin-bottom: 8px; }
+.inv > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.inv > span.r { align-items: flex-end; flex-shrink: 0; }
+.inv small { color: var(--a-muted); }

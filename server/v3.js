@@ -1004,7 +1004,8 @@ function mountV3Routes(r, io) {
     if (!seen) return res.status(428).json({ error: 'Preview the quotation email before sending it.', code: 'PREVIEW_REQUIRED' });
     if (seen !== previewToken(qv, mail)) return res.status(409).json({ error: 'The quotation or the recipient changed after you previewed it. Preview it again before sending.', code: 'PREVIEW_STALE' });
     const st = mailer.status();
-    if (!st.configured) {
+    // fallback: 'compose' → the server could not reach Gmail, the user sends the same previewed message from their own Gmail tab
+    if (!st.configured || req.body?.fallback === 'compose') {
       // Gmail not connected on the server yet → hand the user a pre-filled Gmail compose window
       markSent('gmail', mail.to, mail.link);
       return res.json({ ok: true, via: 'gmail', delivery: 'compose', to: mail.to, link: mail.link, gmail_compose_url: mailer.composeUrl(mail), text: mail.text });
@@ -1015,14 +1016,14 @@ function mountV3Routes(r, io) {
       res.json({ ok: true, via: 'gmail', delivery: 'sent', to: mail.to, link: mail.link, from: st.sender });
     } catch (e) {
       // nothing is marked as sent when the email did not go out
-      res.status(e.status || 502).json({ error: `Email not sent: ${e.message}`, gmail_compose_url: mailer.composeUrl(mail) });
+      res.status(e.status || 502).json({ error: `Email not sent. ${e.message || mailer.describe(e)}`, code: e.code || 'MAIL_FAILED', gmail_compose_url: mailer.composeUrl(mail) });
     }
   });
   r.get('/mail/status', staff, (req, res) => res.json(mailer.status()));
   r.post('/mail/test', owner, async (req, res) => {
     const to = String(req.body?.to || '').trim();
     try { await mailer.send({ to, subject: 'GreenLoop — Gmail connection test', text: 'Gmail is connected. Quotations will be sent from this address.' }); res.json({ ok: true, to }); }
-    catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+    catch (e) { res.status(e.status || 502).json({ error: e.message || mailer.describe(e), code: e.code || 'MAIL_FAILED' }); }
   });
 
   // ── Convert accepted quote → customer (CRM-12) ──
@@ -1073,7 +1074,7 @@ function mountV3Routes(r, io) {
     const welcome = { to: lead.email, subject: 'Welcome to GreenLoop — your customer app access', text: msg, replyTo: getSetting('company_email', '') };
     let email = { sent: false, to: lead.email || null, gmail_compose_url: mailer.isEmail(lead.email) ? mailer.composeUrl(welcome) : null };
     if (mailer.isEmail(lead.email) && mailer.status().configured) {
-      try { await mailer.send(welcome); email.sent = true; } catch (e) { email.error = e.message; }
+      try { await mailer.send(welcome); email.sent = true; } catch (e) { email.error = e.message || mailer.describe(e); }
     }
     res.json({ ok: true, customer_id: accountId, sites: sites.length, plans: created.length, jobs_generated: jobs,
       portal_code: code, portal_url: portal, email, whatsapp_url: waLink(lead.phone, msg) });
@@ -1470,7 +1471,7 @@ function mountV3Routes(r, io) {
           <p style="margin:0 0 8px">Your sign-in code for ${h(account.name)}</p>
           <p style="margin:0 0 16px;font-size:34px;font-weight:700;letter-spacing:6px">${code}</p>
           <p style="margin:0;font-size:13px;color:#55645f">It is valid for 10 minutes. If you did not ask for it, ignore this email.</p></div>` })
-        .catch(e => alertCrm('OTP_NOT_SENT', 'warning', `Sign-in code for ${account.name} could not be emailed to ${to}: ${e.message}`));
+        .catch(e => alertCrm('OTP_NOT_SENT', 'warning', `Sign-in code for ${account.name} could not be emailed to ${to}: ${e.message || mailer.describe(e)}`));
     } else if (mailOn && !to) {
       alertCrm('OTP_NOT_SENT', 'info', `${account.name} asked for a sign-in code but has no email on the account. Add one in Customers, or give them their 4-digit app code.`);
     }

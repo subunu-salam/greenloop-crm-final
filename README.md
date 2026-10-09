@@ -199,7 +199,9 @@ Requirements that have not changed: HTTPS in production; on iPhone the app must 
 
 ## v3.4: Aura glow-up and new logo
 
-A visual release: same screens and features as v3.3, restyled after the "Aura · Glass & Light" UI kit in GreenLoop's green, with a new logo. Each app loads one extra stylesheet, `aura.css`, after `styles.css` and `fx.css`. The file list is in `docs/CHANGES-v3.4.md`.
+A visual release: same screens and features as v3.3, restyled after the "Aura · Glass & Light" UI kit in GreenLoop's green, with a new logo. Each app loads one extra stylesheet, `aura.css`, after `styles.css` and `fx.css`. The file list is in `docs/CHANGES-v3.4.md`. v3.4.1 fixes three display issues found in the end-to-end test pass (same file). v3.4.2 tightens the phone rules per country, makes email failures explain themselves and stops false Overdue alerts for stops added after the cutoff.
+
+**Email on a free host.** Gmail with an app password uses mail ports 465 and 587. Some hosts block them (Render free web services have done so since September 2025). There, connect Gmail through the Gmail API instead (`GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`), which uses the normal web port, or use a paid instance.
 
 ## v3.3 — unique contacts, frequency pricing, quotation preview, driver shift clock
 
