@@ -3,19 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#04221d">
+<meta name="theme-color" content="#07131d">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="manifest.json">
 <title>GreenLoop · Customer</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="fx.css">
+<link rel="stylesheet" href="aura.css">
+<link rel="icon" type="image/svg+xml" href="/shared/logo.svg">
 </head>
 <body>
 <div id="s-login" class="screen hidden">
   <div class="login-hero">
-    <svg viewBox="0 0 24 24" width="44" height="44" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg>
-    <div class="login-title">GreenLoop</div>
+    <svg class="login-mark" viewBox="0 0 64 64" width="64" height="64" aria-hidden="true"><defs><linearGradient id="glgC" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3CF2B4"/><stop offset="1" stop-color="#0FB5A6"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#glgC)"/><path d="M44.5 36A14.5 14.5 0 1 1 30 21.5" fill="none" stroke="#062A24" stroke-width="6.5" stroke-linecap="round"/><path d="M29 24C29 14.5 37 10 48.5 11C49.5 22.5 44 30 34.5 29Z" fill="#fff"/></svg>
+    <div class="login-title">Green<b>Loop</b></div>
     <div class="login-sub">Your visits, photo proof, plans and invoices</div>
   </div>
   <div class="seg"><button id="lm-code" class="on" onclick="loginMode('code')">Mobile and code</button><button id="lm-otp" onclick="loginMode('otp')">Email me a code</button></div>

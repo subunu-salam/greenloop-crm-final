@@ -154,7 +154,7 @@ async function pipeline() {
     </div>`;
   if (s.sources.length) _charts.push(new Chart($('#c-src'), {
     type: 'doughnut',
-    data: { labels: s.sources.map(x => x.source), datasets: [{ data: s.sources.map(x => x.c), backgroundColor: ['#2dd4bf', '#7dd3fc', '#34d399', '#c4b5fd', '#fbbf24', '#fb7185', '#94a3b8'], borderWidth: 0 }] },
+    data: { labels: s.sources.map(x => x.source), datasets: [{ data: s.sources.map(x => x.c), backgroundColor: ['#2ee6a6', '#5ce1e6', '#7cc8ff', '#b9a8ff', '#ffd166', '#ff6b6b', '#94a3b8'], borderWidth: 0 }] },
     options: { responsive: true, maintainAspectRatio: false, cutout: '64%', plugins: { legend: { position: 'right', labels: { color: '#93b3aa', boxWidth: 10 } } } },
   }));
   void leadsRows;

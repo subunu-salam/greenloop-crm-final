@@ -336,10 +336,10 @@ async function dashboard() {
 
   // ── charts ──
   const css = getComputedStyle(document.documentElement);
-  const GREEN = '#22c55e', RED = '#f43f5e', AMBER = '#f59e0b', TEAL = '#14b8a6', BLUE = '#38bdf8', MUTED = css.getPropertyValue('--muted').trim();
+  const GREEN = '#5ce1a6', RED = '#ff6b6b', AMBER = '#ffd166', TEAL = '#2ee6a6', BLUE = '#5ce1e6', MUTED = css.getPropertyValue('--muted').trim();
   Chart.defaults.color = MUTED;
   Chart.defaults.borderColor = 'rgba(255,255,255,.07)';
-  Chart.defaults.font.family = "'Manrope', 'Segoe UI', system-ui, sans-serif";
+  Chart.defaults.font.family = "'Outfit', 'Segoe UI', system-ui, sans-serif";
 
   const bk = buckets(s.series, dashPeriod);
   _charts.push(new Chart($('#c-trend'), {
