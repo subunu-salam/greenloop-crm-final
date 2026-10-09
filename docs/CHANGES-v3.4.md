@@ -47,6 +47,60 @@ Changed (13)
 Not touched: styles.css and fx.css in all three apps, every other script, the server routes,
 the database and the tests.
 
+## v3.4.1: fixes from the end-to-end test pass
+
+Three theme files changed, nothing else:
+
+- public/crm/aura.css       on 1280 to 1500 px laptop screens the tables keep their columns (tighter
+                            padding, narrower menu); a table that still cannot fit scrolls inside its
+                            card. In v3.4.0 the Customers table spilled out of its card at 1280 px.
+- public/customer/aura.css  plan cards and invoice rows: the name and the line under it no longer run
+                            together ("Machari waste pickupWeekly", "INV-202610-000210/2026").
+- public/driver/aura.css    in Arabic and Urdu the phone number reads +971… and not …971+.
+- package.json              version 3.4.1
+
+## v3.4.2: phone rules, email errors, overdue check
+
+- Phone numbers follow each country's real numbering plan, and a refused number says why.
+  UAE mobile 9 digits starting 5, landline 8 digits starting 2, 3, 4, 6, 7 or 9. Saudi mobile 9
+  digits starting 5, landline 9 digits starting 1. Qatar, Oman, Kuwait and Bahrain 8 digits.
+  The field shows the rule under it while you type and turns green on a valid number.
+- Email: a failed send always gives the reason (it could be empty before). The sender tries
+  port 465, then port 587, over IPv4 first. If the server cannot reach Gmail, the preview offers
+  "Open it in my Gmail instead" so the quotation still goes out.
+- Overdue check: a stop added to today after the cutoff is no longer marked Overdue a minute
+  later. It turns Overdue the next day if nobody did it.
+- CRM menu: "Users" is now "Drivers & users", and the page says how to give a driver a truck.
+
+Files
+- server/contacts.js           phone rules per country, error wording
+- public/shared/phone.js       same rules in the browser, live hint under the field
+- server/mailer.js             port fallback, readable errors
+- server/v3.js                 error text on send, "open in my Gmail" fallback (5 small edits)
+- public/crm/sales.js          fallback button in the quotation preview
+- server/services/sla.js       overdue check
+- public/crm/app.js            menu label and page text (3 lines)
+- test/unit/v342.test.js       new, 13 checks
+- test/run.js                  runs the new suite
+- package.json                 version 3.4.2
+
+## v3.4.3: Resend and Brevo for email
+
+Two more ways to send email, both over the normal web port, so they work on hosts that block
+mail ports (free Render web services) and on networks that block them.
+
+- Resend: set RESEND_API_KEY and MAIL_FROM (an address on a domain verified in Resend).
+- Brevo:  set BREVO_API_KEY and MAIL_FROM (a sender verified in Brevo).
+- Order when several are set: Resend, Brevo, Gmail API, Gmail app password.
+- Used for everything the app emails: quotations, the welcome message with app access, sign-in
+  codes and the test email in Settings.
+
+Files
+- server/mailer.js        the two services, clear refusal messages
+- public/crm/sales.js     the banner names the service in use (1 line)
+- deploy/.env.example     the new settings
+- package.json            version 3.4.3
+
 ## Going back
 
 Delete the `<link rel="stylesheet" href="aura.css">` line in an app's index.html and that app

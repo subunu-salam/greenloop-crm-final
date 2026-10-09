@@ -298,7 +298,7 @@ async function leadStage(id, stage) { await api('/leads/' + id, { method: 'PUT',
 function mailBanner(m) {
   if (!m) return '';
   return m.configured
-    ? `<div class="banner ok">${icon('mail', 16)}<div>Gmail connected — quotations are emailed from <b>${esc(m.sender || 'your Gmail account')}</b> (${m.mode === 'api' ? 'Gmail API' : 'Gmail SMTP'}).</div></div>`
+    ? `<div class="banner ok">${icon('mail', 16)}<div>Email connected — quotations are emailed from <b>${esc(m.sender || 'your account')}</b> (${esc(m.provider || (m.mode === 'api' ? 'Gmail API' : 'Gmail SMTP'))}).${m.note ? '<br><b>' + esc(m.note) + '</b>' : ''}</div></div>`
     : `<div class="banner">${icon('mail', 16)}<div><b>Gmail is not connected on the server yet.</b> After the preview, Send opens the message in your own Gmail for you to send. To send straight from here, add a Gmail account in the server settings (README, Gmail section).</div></div>`;
 }
 let quoteFilter = 'all';
@@ -561,9 +561,23 @@ async function sendQuote(id) {
   } catch (e) {
     if (tab) tab.close();
     $('#pv-confirm').classList.add('hidden');
-    $('#m-err').textContent = e.message;
+    // the server could not reach Gmail: say why, and offer to send the same message from the user's own Gmail
+    if (e.data && e.data.gmail_compose_url && e.data.code !== 'PREVIEW_STALE') {
+      $('#m-err').innerHTML = `${esc(e.message)}<br><button class="btn gmail small" style="margin-top:8px" onclick="sendQuoteCompose(${id})">${icon('mail', 13)} Open it in my Gmail instead</button>`;
+    } else $('#m-err').textContent = e.message;
     if (e.data && e.data.code === 'PREVIEW_STALE') loadPreview(id);
   }
+}
+// Same previewed message, sent by hand from the user's Gmail tab (used when the server cannot reach Gmail).
+async function sendQuoteCompose(id) {
+  if (!_pv || _pv.id !== id) return;
+  const tab = window.open('about:blank', '_blank');
+  try {
+    const r = await api(`/quotations/${id}/send`, { method: 'POST', body: { base_url: location.origin, to: _pv.to, via: 'gmail', preview_token: _pv.token, fallback: 'compose' } });
+    if (tab) tab.location = r.gmail_compose_url;
+    toast(tab ? `Gmail opened with the quotation for ${r.to}. Press Send there.` : 'Your browser blocked the Gmail tab. Allow pop-ups for this site and try again.', tab ? 'success' : 'warning');
+    _pv = null; quoteDetail(id); if (currentPage === 'quotations') quotations();
+  } catch (e) { if (tab) tab.close(); $('#m-err').textContent = e.message; }
 }
 async function sendQuoteWa(id) {
   try {

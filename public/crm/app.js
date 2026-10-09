@@ -81,7 +81,7 @@ const NAV = [
   ['Admin', 'owner'],
   ['catalogue', 'tag', 'Service catalogue', 'owner'],
   ['vehicles', 'truck', 'Vehicles', 'owner'],
-  ['users', 'users', 'Users', 'owner'],
+  ['users', 'users', 'Drivers & users', 'owner'],
   ['reports', 'chart', 'Reports'],
   ['audit', 'shield', 'Audit log', 'owner'],
   ['settingsV3', 'settings', 'Settings', 'owner'],
@@ -133,7 +133,7 @@ $('#login-pass').addEventListener('keydown', e => e.key === 'Enter' && doLogin()
 async function boot() {
   $('#login-screen').classList.add('hidden'); $('#app').classList.remove('hidden');
   try { const me = await api('/me'); CRM_ROLE = me.crm_role === 'ops' ? 'ops' : 'owner'; $('#me-role').textContent = CRM_ROLE === 'ops' ? 'Ops staff' : 'Owner'; $('#me-name').textContent = me.name;
-    if (me.weak_password) setTimeout(() => toast('Security: this account still uses the default password. Change it in Admin → Users.', 'warning'), 1200); } catch {}
+    if (me.weak_password) setTimeout(() => toast('Security: this account still uses the default password. Change it in Admin → Drivers & users.', 'warning'), 1200); } catch {}
   buildNav();
   socket = io({ auth: { token } });
   socket.on('connect', () => { $('#live-dot').classList.remove('off'); $('#live-label').textContent = 'live stream on'; });
@@ -659,9 +659,9 @@ async function users() {
   const vehicles = await api('/vehicles');
   window._vehCache = vehicles;
   $('#main').innerHTML = `
-    <h1>User Management</h1>
-    <p class="sub">Drivers sign in with a 4-digit PIN; owners and ops staff with username and password. Ops staff can't see users, settings, vehicles or billing actions.</p>
-    <div class="row" style="margin-bottom:12px"><button class="btn primary" onclick="userForm()">${icon('plus', 13)} Add user</button></div>
+    <h1>Drivers &amp; users</h1>
+    <p class="sub">Add drivers here and give each one a truck: click Edit, then choose the vehicle. A driver sees the stops of their truck in the driver app and signs in with a 4-digit PIN. Owners and ops staff sign in with username and password; ops staff can't see users, settings, vehicles or billing actions.</p>
+    <div class="row" style="margin-bottom:12px"><button class="btn primary" onclick="userForm()">${icon('plus', 13)} Add driver or user</button></div>
     <div class="card"><table>
     <tr><th>Name</th><th>Role</th><th>Login</th><th>Vehicle</th><th>Phone</th><th>Status</th><th></th></tr>
     ${rows.map(r => `<tr>
