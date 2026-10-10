@@ -165,7 +165,11 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   rec('OTP', 'Asking by email address works too', outbox.length === 1 && outbox[0].to === 'buyer@freq.ae', outbox.length + ' email');
   mailer.send = realSend; delete process.env.GMAIL_USER; delete process.env.GMAIL_APP_PASSWORD;
   r = await call('POST', '/auth/customer-otp/request', { body: { identifier: '+971507771001' } });
-  rec('OTP', 'Without Gmail the demo still shows the code on screen', /^\d{6}$/.test(r.body.dev_code || ''), 'demo mode');
+  rec('OTP', 'Without Gmail the code is not shown on screen any more (v3.4.4)', r.body.dev_code === undefined, 'no dev_code');
+  process.env.OTP_DEV = '1';
+  r = await call('POST', '/auth/customer-otp/request', { body: { identifier: '+971507771001' } });
+  delete process.env.OTP_DEV;
+  rec('OTP', 'OTP_DEV=1 shows the code on screen for local testing', /^\d{6}$/.test(r.body.dev_code || ''), 'test mode');
 
   // ───────── DRIVER: shift clock, arrival proof, finish / issue ─────────
   const drivers = q.all(`SELECT id, full_name, vehicle_id FROM users WHERE role='driver' AND is_active=1 AND vehicle_id IS NOT NULL ORDER BY id`);

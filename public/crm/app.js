@@ -589,7 +589,7 @@ async function customers() {
       <td>${r.collected_this_month}/${r.frequency}</td>
       <td class="muted small">${esc(GLPhone.format(r.contact_phone))}${r.email ? '<br>' + esc(r.email) : ''}</td>
       <td>${r.is_active ? '<span class="pill collected">active</span>' : '<span class="pill canceled">inactive</span>'}</td>
-      <td class="row" style="gap:6px;flex-wrap:nowrap"><button class="btn primary small" onclick="customer360(${r.id})">360</button><button class="btn ghost small" onclick='customerForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'>Edit</button></td>
+      <td class="row" style="gap:6px;flex-wrap:nowrap"><button class="btn primary small" onclick="customer360(${r.id})">360</button><button class="btn ghost small" onclick='customerForm(${JSON.stringify(r).replace(/&/g, '&amp;').replace(/'/g, "&#39;")})'>Edit</button></td>
     </tr>`).join('')}</table></div>`;
 }
 async function importCsv(input) {
@@ -669,7 +669,7 @@ async function users() {
       <td class="muted small">${r.role === 'admin' ? esc(r.username) : 'PIN ••••'}</td>
       <td>${esc(r.fleet_number || '—')}</td><td class="muted small">${esc(GLPhone.format(r.phone))}</td>
       <td>${r.is_active ? '<span class="pill collected">active</span>' : '<span class="pill canceled">disabled</span>'}</td>
-      <td><button class="btn ghost small" onclick='userForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'>Edit</button></td>
+      <td><button class="btn ghost small" onclick='userForm(${JSON.stringify(r).replace(/&/g, '&amp;').replace(/'/g, "&#39;")})'>Edit</button></td>
     </tr>`).join('')}</table></div>`;
 }
 function userForm(u = {}) {
@@ -729,7 +729,7 @@ async function vehicles() {
       <td><span class="zone-tag">${esc(r.zone)}</span></td><td>${r.max_daily_capacity}</td>
       <td>${String(r.service_tags || 'waste').split(',').map(t => `<span class="pill ${t}">${t}</span>`).join(' ')}</td>
       <td>${r.is_active ? '<span class="pill collected">active</span>' : '<span class="pill canceled">parked</span>'}</td>
-      <td><button class="btn ghost small" onclick='vehicleForm(${JSON.stringify(r).replace(/'/g, "&#39;")})'>Edit</button></td>
+      <td><button class="btn ghost small" onclick='vehicleForm(${JSON.stringify(r).replace(/&/g, '&amp;').replace(/'/g, "&#39;")})'>Edit</button></td>
     </tr>`).join('')}</table></div>`;
 }
 function vehicleForm(v = {}) {

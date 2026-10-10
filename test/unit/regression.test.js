@@ -84,7 +84,9 @@ const assert = require('assert');
   r = await call('GET', `/customers/${acct}/360`, { token: OPS }); console.log('✔ 360: sites', r.body.sites.length, 'plans', r.body.plans.length, 'risk', r.body.risk);
   r = await call('GET', '/pipeline/stats', { token: A }); console.log('✔ pipeline', r.body.by_stage, r.body.lead_to_customer_pct + '%');
   // OTP
+  process.env.OTP_DEV = '1';   // v3.4.4: the code is shown on screen only when this is set on purpose
   r = await call('POST', '/auth/customer-otp/request', { body: { identifier: '050 123 4567' } });
+  delete process.env.OTP_DEV;
   r = await call('POST', '/auth/customer-otp/verify', { body: { identifier: '0501234567', code: r.body.dev_code } });
   assert(r.body.token); console.log('✔ OTP login as', r.body.customer.name);
   r = await call('GET', '/customer/sites', { token: C }); assert.equal(r.body.sites.length, 2);
