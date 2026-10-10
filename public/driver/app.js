@@ -738,6 +738,9 @@ async function flushQueue() {
       } catch { remaining.push(p); held.add(key); }
     }
   } finally { flushing = false; }
+  // v3.4.4: keep steps the driver saved while this send was running (they were being dropped)
+  const added = getQueue().slice(q.length);
+  remaining.push(...added);
   setQueue(remaining);
   if (!remaining.length && q.length) { pushNotif('ok', 'Back online', 'Everything saved on this phone was sent to the office.'); if (token) loadJobs().then(() => { if (activeTab === 'home') renderHome(); }); }
 }

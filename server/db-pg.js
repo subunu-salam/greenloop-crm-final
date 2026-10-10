@@ -94,7 +94,7 @@ async function seed() {
      ('TRUCK-02', 'DXB B 33482', 15, 'Marina')`
   );
 
-  const admin = bcrypt.hashSync('admin123', 10);
+  const admin = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10);
   await q.run(
     `INSERT INTO users (full_name, role, username, password_hash, phone)
      VALUES ($1, 'admin', 'admin', $2, $3)`,

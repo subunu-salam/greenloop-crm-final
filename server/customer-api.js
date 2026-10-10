@@ -36,6 +36,9 @@ function seedPortalCodes() {
   try {
     // Demo accounts: mobile 050 000 100X + code 100X (only set when the
     // customer has no code yet, i.e. a freshly seeded demo database).
+    // v3.4.4: once any customer has a code the database is in use, so nothing is touched again.
+    // Before, a restart could overwrite a real customer's phone and give them a demo code.
+    if (q.get(`SELECT id FROM customers WHERE portal_code_hash IS NOT NULL LIMIT 1`)) return;
     const first = q.all(`SELECT id, portal_code_hash h FROM customers WHERE is_active=1 ORDER BY id LIMIT 3`);
     let n = 0;
     ['1001', '1002', '1003'].forEach((code, i) => {

@@ -101,6 +101,33 @@ Files
 - deploy/.env.example     the new settings
 - package.json            version 3.4.3
 
+## v3.4.4: security fixes from the test pass
+
+- Sign-in code: no longer sent back to the browser. It shows on screen only when OTP_DEV=1 is set on purpose
+  for local testing. render.yaml now sets OTP_DEV to 0.
+- Demo passwords are no longer printed on the CRM and customer sign-in pages. A new database takes its
+  admin password from ADMIN_PASSWORD when that is set.
+- Customer text (access notes and other fields) can no longer run as script when staff click Edit in the CRM.
+  Plan dates and status are shown as plain text.
+- Restart no longer rewrites a customer's phone or gives out a demo code once any customer has a code.
+- Customer history report accepts only real dates in its address.
+- Driver app: a step saved while the offline queue is sending is kept. Live location starts when the app
+  is reopened already signed in.
+
+Files
+- server/v3.js                 sign-in code rule, history report dates
+- server/customer-api.js       demo codes only on an empty database
+- server/db.js, server/db-pg.js  ADMIN_PASSWORD for a new database (1 line each)
+- public/crm/index.html        demo line removed
+- public/customer/index.html   demo line removed
+- public/crm/app.js            safe Edit buttons (4 lines)
+- public/crm/sales.js          safe Edit buttons, plan dates as text (2 lines)
+- public/driver/app.js         offline queue (3 lines)
+- public/driver/tracking.js    start on reopen (1 line)
+- render.yaml                  OTP_DEV 0
+- test/unit/regression.test.js, test/unit/v33.test.js  updated for the sign-in code rule
+- README.md, deploy/.env.example, package.json (3.4.4)
+
 ## Going back
 
 Delete the `<link rel="stylesheet" href="aura.css">` line in an app's index.html and that app

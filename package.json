@@ -1,6 +1,6 @@
 {
   "name": "greenloop-waste-logistics",
-  "version": "3.4.3",
+  "version": "3.4.4",
   "description": "Automated Waste Logistics & Fleet Management \u2014 Majari UAE",
   "main": "server/index.js",
   "scripts": {

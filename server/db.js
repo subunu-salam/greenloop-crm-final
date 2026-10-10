@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS settings (
     q.run(`INSERT INTO vehicles(fleet_number,plate,max_daily_capacity,zone) VALUES
       ('TRUCK-01','DXB A 71214',15,'Deira'),
       ('TRUCK-02','DXB B 33482',15,'Marina')`);
-    const admin = bcrypt.hashSync('admin123', 10);
+    const admin = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10);
     q.run(`INSERT INTO users(full_name,role,username,password_hash,phone) VALUES
       ('Shahzad (Owner)','admin','admin','${admin}','+971500000001')`);
     const pins = { 'Ali Hassan': ['1111', 1], 'Ramesh Kumar': ['2222', 2], 'Joseph Mathew': ['3333', null] };
