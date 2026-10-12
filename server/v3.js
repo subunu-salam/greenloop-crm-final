@@ -1476,8 +1476,9 @@ function mountV3Routes(r, io) {
       alertCrm('OTP_NOT_SENT', 'info', `${account.name} asked for a sign-in code but has no email on the account. Add one in Customers, or give them their 4-digit app code.`);
     }
     const out = { ...generic };
-    // Demo mode shows the code on screen. It is off as soon as Gmail is connected, unless OTP_DEV=1 forces it.
-    if (process.env.OTP_DEV === '1' || (process.env.OTP_DEV !== '0' && !mailOn)) out.dev_code = code;
+    // v3.4.4: the code is shown on screen only when OTP_DEV=1 is set on purpose (local testing).
+    // It used to be shown whenever email was not connected, which let anyone sign in with just a phone number.
+    if (process.env.OTP_DEV === '1') out.dev_code = code;
     res.json(out);
   });
   r.post('/auth/customer-otp/verify', (req, res) => {
@@ -1597,7 +1598,9 @@ function mountV3Routes(r, io) {
   });
   r.get('/customer/history-v3/pdf', cust, (req, res) => {
     const acct = accountOf(custId(req));
-    const from = req.query.from || addDays(ymd(), -90), to = req.query.to || ymd();
+    // v3.4.4: only real dates are accepted; anything else falls back to the default range
+    const isDay = s => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+    const from = isDay(req.query.from) ? req.query.from : addDays(ymd(), -90), to = isDay(req.query.to) ? req.query.to : ymd();
     const c = q.get(`SELECT * FROM customers WHERE id=?`, acct);
     const rows = q.all(`SELECT p.*, c.branch, u.full_name driver, st.name service_name FROM pickups p JOIN customers c ON c.id=p.customer_id
       LEFT JOIN users u ON u.id=p.driver_id LEFT JOIN service_types st ON st.code=p.service_type

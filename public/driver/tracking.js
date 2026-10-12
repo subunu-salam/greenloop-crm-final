@@ -101,6 +101,9 @@
     }, 2000);
   }
 
+  // v3.4.4: the app was reopened already signed in, so enterApp ran before this file loaded
+  if (token()) startTracking();
+
   const prevLogout = window.logout;
   if (typeof prevLogout === 'function') {
     window.logout = function () {

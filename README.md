@@ -93,7 +93,7 @@ New server module: `server/v3.js` (schema migrations run automatically on start,
 ### Environment variables
 | Var | Default | Purpose |
 |---|---|---|
-| `OTP_DEV` | on | Returns the OTP in the API response (no SMS gateway yet). Set `OTP_DEV=0` in production once SMS/email is wired. |
+| `OTP_DEV` | off | Set `OTP_DEV=1` only for local testing: it shows the one-time code on screen. Never set it on a live site. |
 | `SEED_DEMO` | on | Seeds demo leads + a sent quotation. Set `0` to disable. |
 | `PROOF_RADIUS_M` | 150 | Max photo distance from site. |
 
@@ -218,7 +218,7 @@ A visual release: same screens and features as v3.3, restyled after the "Aura ·
 ### Settings
 | Variable | Default | Purpose |
 |---|---|---|
-| `OTP_DEV` | on until Gmail is connected | Shows the one-time code on screen (demo). Set `0` in production; `1` forces it on. |
+| `OTP_DEV` | off | `1` shows the one-time code on screen, for local testing only. Leave it off (or `0`) on a live site. |
 | `GMAIL_USER` + `GMAIL_APP_PASSWORD` | — | Now also used for one-time codes and welcome emails, not only quotations. |
 
 No new npm packages. New tables and columns are created on start; existing data is kept.

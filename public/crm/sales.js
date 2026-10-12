@@ -12,7 +12,7 @@ let _services = null;
 async function services() { if (!_services) _services = await api('/service-types'); return _services; }
 const svcName = code => (_services || []).find(s => s.code === code)?.name || code;
 const svcCat = code => (_services || []).find(s => s.code === code)?.category || 'waste';
-const jsonAttr = o => JSON.stringify(o).replace(/'/g, '&#39;');
+const jsonAttr = o => JSON.stringify(o).replace(/&/g, '&amp;').replace(/'/g, '&#39;');   // v3.4.4: & first, so &quot; in data stays text
 function openDoc(path) { window.open(`${API}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}`, '_blank'); }
 
 // ── shared recurrence editor ─────────────────────────────────
@@ -675,8 +675,8 @@ async function plans() {
     <div class="card scroll-x">${rows.length ? `<table><tr><th>Customer / site</th><th>Service</th><th>Recurrence</th><th>Window</th><th>Period</th><th>Price</th><th>Status</th><th></th></tr>
     ${rows.map(p => `<tr><td><b>${esc(p.name)}</b><br><span class="muted small">${esc(p.branch || '')} · ${esc(p.zone)}</span></td>
       <td><span class="pill ${p.category || 'waste'}">${esc(p.service_name || p.service_code)}</span></td><td class="small">${esc(p.rule_label)}</td><td class="small">${esc(p.time_window)}</td>
-      <td class="small muted">${p.start_date} → ${p.end_date || 'ongoing'}</td><td class="small">${AED(p.unit_price)}<br><span class="muted">${p.billing === 'per_visit' ? 'per visit' : 'monthly'}</span></td>
-      <td><span class="pill ${p.paused ? 'paused' : p.status}">${p.paused ? 'paused' + (p.pause_to ? ' → ' + p.pause_to : '') : p.status}</span></td>
+      <td class="small muted">${esc(p.start_date)} → ${esc(p.end_date || 'ongoing')}</td><td class="small">${AED(p.unit_price)}<br><span class="muted">${p.billing === 'per_visit' ? 'per visit' : 'monthly'}</span></td>
+      <td><span class="pill ${p.paused ? 'paused' : esc(p.status)}">${p.paused ? 'paused' + (p.pause_to ? ' → ' + esc(p.pause_to) : '') : esc(p.status)}</span></td>
       <td class="r" style="white-space:nowrap"><button class="btn ghost small" onclick="planPause(${p.id}, ${p.paused ? 0 : 1})">${p.paused ? 'Resume' : 'Pause'}</button> <button class="btn ghost small" onclick='planForm(${jsonAttr(p)})'>Edit</button></td></tr>`).join('')}</table>`
     : '<p class="empty">No recurring plans yet — convert an accepted quotation or add one here.</p>'}</div>`;
 }

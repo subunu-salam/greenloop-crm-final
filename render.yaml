@@ -24,4 +24,4 @@ services:
       - key: DATA_DIR
         value: /var/data
       - key: OTP_DEV
-        value: "1"
+        value: "0"
