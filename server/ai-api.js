@@ -1,4 +1,5 @@
 const { buildOpsBrief, customerRiskHints } = require('./ai');
+const insights = require('./insights');   // v3.5 AI insights and performance reports
 const jwt = require('jsonwebtoken');
 require('./security').ensureSecret();
 const SECRET = process.env.JWT_SECRET;
@@ -18,6 +19,7 @@ function authAdmin(req, res, next) {
 }
 
 function mountAiRoutes(r) {
+  mountInsightRoutes(r);
   r.get('/ai/ops-brief', authAdmin, async (req, res) => {
     try {
       const brief = await buildOpsBrief();
@@ -36,4 +38,13 @@ function mountAiRoutes(r) {
   });
 }
 
-module.exports = { mountAiRoutes };
+// v3.5: AI insights. ?source=auto (default: your data when there is enough of it, else demo) | live | demo
+const src = req => (['live', 'demo'].includes(req.query.source) ? req.query.source : 'auto');
+function mountInsightRoutes(r) {
+  const run = fn => (req, res) => { try { res.json(fn(req)); } catch (e) { console.error('insights:', e); res.status(500).json({ error: 'Could not build the insights: ' + e.message }); } };
+  r.get('/ai/insights', authAdmin, run(req => insights.overview(src(req))));
+  r.get('/ai/reports/daily', authAdmin, run(req => insights.dailyReport(src(req), req.query.date)));
+  r.get('/ai/reports/weekly', authAdmin, run(req => insights.weeklyReport(src(req), req.query.end)));
+}
+
+module.exports = { mountAiRoutes, mountInsightRoutes };

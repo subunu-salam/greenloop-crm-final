@@ -62,6 +62,8 @@ let CRM_ROLE = 'owner';
 const NAV = [
   ['Operations'],
   ['dashboard', 'grid', 'Dashboard'],
+  ['aiInsights', 'sparkle', 'AI insights'],              // v3.5
+  ['perfReports', 'activity', 'Performance reports'],    // v3.5
   ['ledger', 'list', 'Daily Route Ledger'],
   ['fleet', 'truck', 'Fleet Load Tracker'],
   ['maintenance', 'wrench', 'Fleet maintenance'],

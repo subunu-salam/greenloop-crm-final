@@ -197,6 +197,10 @@ Requirements that have not changed: HTTPS in production; on iPhone the app must 
 
 ---
 
+## v3.5: AI insights and performance reports
+
+Two new CRM pages. **AI insights** gives recommended actions with a confidence level, a 14-day demand forecast with an AI confidence measured against actual results, driver delay patterns and tomorrow's stops most likely to run late. **Performance reports** gives daily and weekly reports with an AI summary, baselines, rankings, CSV and print. Until there are about 150 finished jobs in 28 days the pages show demo data and say so. Details in `docs/CHANGES-v3.5.md`.
+
 ## v3.4: Aura glow-up and new logo
 
 A visual release: same screens and features as v3.3, restyled after the "Aura · Glass & Light" UI kit in GreenLoop's green, with a new logo. Each app loads one extra stylesheet, `aura.css`, after `styles.css` and `fx.css`. The file list is in `docs/CHANGES-v3.4.md`. v3.4.1 fixes three display issues found in the end-to-end test pass (same file). v3.4.2 tightens the phone rules per country, makes email failures explain themselves and stops false Overdue alerts for stops added after the cutoff.
