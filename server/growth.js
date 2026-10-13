@@ -328,8 +328,117 @@ async function scanHandler(req, res) {
   res.json({ id: Number(info.lastInsertRowid), source, summary, ...est });
 }
 
+// ═════════════ DEMO DATA ═══════════════════════════════════
+// Fills Customer health and Green rewards for a sales demo. Every row it adds is
+// tagged ([growth-demo] note, DEMO- invoice number, created_by 'demo') so
+// clearDemo() removes exactly what was added. Demo pickups are never billable.
+const DEMO_TAG = '[growth-demo]';
+function clearDemo() {
+  const ids = q.all(`SELECT id FROM pickups WHERE notes=?`, DEMO_TAG).map(r => r.id);
+  const list = ids.join(',') || '0';
+  q.run(`DELETE FROM reward_points WHERE created_by='demo' OR pickup_id IN (${list})`);
+  q.run(`DELETE FROM reward_redemptions WHERE decided_by='demo' OR note=?`, DEMO_TAG);
+  q.run(`DELETE FROM payments WHERE invoice_id IN (SELECT id FROM invoices WHERE number LIKE 'DEMO-%')`);
+  q.run(`DELETE FROM invoices WHERE number LIKE 'DEMO-%'`);
+  q.run(`DELETE FROM alerts WHERE pickup_id IN (${list})`);
+  q.run(`DELETE FROM pickups WHERE id IN (${list})`);
+  q.run(`UPDATE health_scores SET contacted_at=NULL, contacted_by=NULL, contact_note=NULL WHERE contacted_by='Sales team' AND contact_note LIKE 'Called store manager, agreed extra Thursday pickup'`);
+  recalcHealth({ notify: false });
+  return { removed_pickups: ids.length };
+}
+function seedDemo() {
+  clearDemo();
+  const today = ymd();
+  const cs = q.all(`SELECT * FROM customers WHERE is_active=1 ORDER BY id`);
+  if (cs.length < 8) throw new Error('Add at least 8 active customers first');
+  const veh = q.get(`SELECT id FROM vehicles WHERE is_active=1 ORDER BY id`);
+  const job = (c, daysAgo, status, conf = null) => Number(q.run(
+    `INSERT INTO pickups(customer_id,vehicle_id,scheduled_date,status,confirmation_status,completed_at,notes,billable,anomaly_reason) VALUES (?,?,?,?,?,?,?,0,?)`,
+    c.id, veh ? veh.id : null, addDays(today, -daysAgo), status, conf,
+    status === 'pickup' ? null : addDays(today, -daysAgo) + 'T08:30:00.000Z', DEMO_TAG, status === 'canceled' ? 'CLOSED' : null).lastInsertRowid);
+  const inv = (c, n, amount, dueAgo) => q.run(`INSERT INTO invoices(number,customer_id,period,subtotal,vat,amount,due_date,status) VALUES (?,?,?,?,?,?,?,?)`,
+    'DEMO-' + n, c.account_id || c.id, addDays(today, -dueAgo - 15).slice(0, 7), money(amount / 1.05), money(amount - amount / 1.05), amount, addDays(today, -dueAgo), 'issued');
+
+  // regular history for everyone: one collected visit every ~10 days over 90 days
+  cs.forEach((c, i) => { for (let d = 3 + (i % 4); d <= 88; d += 10) job(c, d, 'collected'); });
+
+  // At risk: missed pickups + disputes + overdue invoices
+  const risk = cs.slice(1, 4);
+  risk.forEach((c, k) => {
+    for (let m = 0; m < 3; m++) job(c, 4 + m * 9 + k, 'canceled', 'confirmed');
+    job(c, 15 + k, 'canceled', 'disputed');
+    inv(c, `R${k}`, 1260 + k * 420, 12 + k * 5);
+    if (k === 0) inv(c, `R${k}b`, 840, 40);
+  });
+  // Watch: one or two problems
+  const watch = cs.slice(4, 7);
+  watch.forEach((c, k) => {
+    for (let m = 0; m < 2; m++) job(c, 6 + m * 12, 'canceled', 'auto_confirmed');
+    if (k === 1) job(c, 25, 'canceled', 'disputed'); else inv(c, `W${k}`, 525, 8);
+  });
+  // Booking drop: steady before, almost nothing in the last month
+  const drop = cs[7];
+  q.run(`DELETE FROM pickups WHERE customer_id=? AND notes=? AND scheduled_date>?`, drop.id, DEMO_TAG, addDays(today, -30));
+  for (let d = 32; d <= 88; d += 6) job(drop, d, 'collected');
+  job(drop, 9, 'canceled', 'confirmed');
+  job(drop, 20, 'canceled', 'confirmed');
+
+  recalcHealth({ notify: false });
+  // one account already followed up, to show the follow-up column
+  q.run(`UPDATE health_scores SET contacted_at=datetime('now','-1 day'), contacted_by='Sales team', contact_note='Called store manager, agreed extra Thursday pickup' WHERE customer_id=?`, watch[0].id);
+
+  // Green rewards: ratings on this month's demo visits
+  const month = today.slice(0, 7);
+  cs.forEach((c, i) => {
+    const visits = q.all(`SELECT id FROM pickups WHERE customer_id=? AND notes=? AND status='collected' AND scheduled_date>=? ORDER BY scheduled_date DESC`, c.id, DEMO_TAG, addDays(today, -28));
+    visits.forEach((v, k) => {
+      const rating = risk.includes(c) ? (k % 2 ? 'poor' : 'average') : (i + k) % 5 === 4 ? 'average' : (i + k) % 9 === 8 ? 'poor' : 'good';
+      q.run(`UPDATE pickups SET segregation_rating=? WHERE id=?`, rating, v.id);
+      const pts = pointsFor(rating);
+      if (pts > 0) q.run(`INSERT INTO reward_points(customer_id,pickup_id,points,kind,reason,created_by,created_at) VALUES (?,?,?,?,?,?,datetime('now',?))`,
+        c.id, v.id, pts, 'earn', `${rating === 'good' ? 'Good' : 'Average'} segregation (demo)`, 'demo', `-${k * 6} days`);
+    });
+    // a few extra visits this month so the leaderboard has spread
+    const extra = (i * 7) % 6;
+    for (let k = 0; k < extra && !risk.includes(c); k++) {
+      const id = job(c, 1 + k * 3, 'collected');
+      q.run(`UPDATE pickups SET segregation_rating='good' WHERE id=?`, id);
+      q.run(`INSERT INTO reward_points(customer_id,pickup_id,points,kind,reason,created_by) VALUES (?,?,?,?,?,?)`, c.id, id, pointsFor('good'), 'earn', 'Good segregation (demo)', 'demo');
+    }
+  });
+  // earlier-month points so balances are big enough to redeem
+  cs.forEach((c, i) => { if (!risk.includes(c)) q.run(`INSERT INTO reward_points(customer_id,points,kind,reason,created_by,created_at) VALUES (?,?,?,?,?,datetime('now','-40 days'))`, c.id, 60 + ((i * 37) % 220), 'earn', 'Points from last month (demo)', 'demo'); });
+  // the first customer (used for the customer-app demo) can redeem straight away
+  q.run(`INSERT INTO reward_points(customer_id,points,kind,reason,created_by,created_at) VALUES (?,?,?,?,?,datetime('now','-35 days'))`, cs[0].id, 320, 'earn', 'Points from last month (demo)', 'demo');
+
+  // reward requests in each state
+  const cat = q.all(`SELECT * FROM rewards_catalog WHERE is_active=1 ORDER BY points_cost`);
+  const redeem = (c, rw, status) => {
+    q.run(`INSERT INTO reward_redemptions(customer_id,reward_id,reward_name,points,discount_aed,status,note,decided_by,decided_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+      c.id, rw.id, rw.name, rw.points_cost, rw.discount_aed, status, DEMO_TAG, status === 'requested' ? null : 'demo', status === 'requested' ? null : new Date().toISOString());
+    q.run(`INSERT INTO reward_points(customer_id,points,kind,reason,created_by) VALUES (?,?,?,?,?)`, c.id, -rw.points_cost, 'redeem', `Redeemed: ${rw.name}`, 'demo');
+    q.run(`INSERT INTO reward_points(customer_id,points,kind,reason,created_by) VALUES (?,?,?,?,?)`, c.id, rw.points_cost, 'adjust', 'Demo points for this request', 'demo');
+  };
+  if (cat.length) {
+    redeem(cs[9 % cs.length], cat[0], 'requested');
+    redeem(cs[12 % cs.length], cat[Math.min(1, cat.length - 1)], 'requested');
+    redeem(cs[15 % cs.length], cat[0], 'approved');
+    redeem(cs[18 % cs.length], cat[Math.min(1, cat.length - 1)], 'applied');
+  }
+  const s = q.all(`SELECT band, COUNT(*) n FROM health_scores GROUP BY band`);
+  return { ok: true, health: Object.fromEntries(s.map(r => [r.band, r.n])), demo_customer: `${cs[0].name} (${cs[0].branch || ''})` };
+}
+
 // ═════════════ ROUTES ═══════════════════════════════════════
 function mountGrowthRoutes(r, io) {
+  // ── Demo data (owner) ──
+  r.post('/growth/demo', owner, (req, res) => {
+    try { const out = seedDemo(); if (io) io.to('staff').emit('rewards:changed', {}); res.json(out); }
+    catch (e) { res.status(400).json({ error: e.message }); }
+  });
+  r.delete('/growth/demo', owner, (req, res) => res.json({ ok: true, ...clearDemo() }));
+  r.get('/growth/demo', staff, (req, res) => res.json({ loaded: !!q.get(`SELECT id FROM pickups WHERE notes=? LIMIT 1`, DEMO_TAG) }));
+
   // ── Health score ──
   r.get('/health-scores', staff, (req, res) => {
     if (!getSetting('health_last_run', '')) recalcHealth({ notify: false });
@@ -504,4 +613,4 @@ ensureSchema();
 // Mounted ahead of the global text-length guard in index.js (the photo is a long data URL).
 const scanRoute = [cust, scanHandler];
 
-module.exports = { mountGrowthRoutes, scanRoute, startHealth, recalcHealth, scoreCustomer, rateSegregation, estimate, leaderboard };
+module.exports = { mountGrowthRoutes, seedDemo, clearDemo, scanRoute, startHealth, recalcHealth, scoreCustomer, rateSegregation, estimate, leaderboard };
