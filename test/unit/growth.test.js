@@ -136,6 +136,22 @@ const today = ymd();
   rec('Scanner', 'Owner can change which service a waste type maps to', r.status === 200 && growth.estimate(['glass'], 'small').service_code === 'WASTE_BULK');
   rec('Scanner', 'Office staff cannot use the customer scanner', (await call('POST', '/customer/scan', { token: OPS, body: { categories: ['glass'] } })).status === 403);
 
+  // ══ DEMO DATA ══
+  const pickupsBefore = q.get(`SELECT COUNT(*) n FROM pickups`).n, invBefore = q.get(`SELECT COUNT(*) n FROM invoices`).n;
+  rec('Demo', 'Ops staff cannot load demo data', (await call('POST', '/growth/demo', { token: OPS })).status === 403);
+  r = await call('POST', '/growth/demo', { token: A });
+  rec('Demo', 'Demo data fills every health group', r.status === 200 && r.body.health.at_risk >= 3 && r.body.health.watch >= 2 && r.body.health.healthy > 10, JSON.stringify(r.body.health));
+  const ov = (await call('GET', '/rewards/overview', { token: A })).body;
+  rec('Demo', 'Rewards screen has points, ratings and requests in each state', ov.issued_this_month > 100 && ov.ratings.good > 20 && ov.ratings.poor > 0 && ov.redemptions.some(x => x.status === 'requested') && ov.redemptions.some(x => x.status === 'applied'), `${ov.issued_this_month} pts`);
+  const cr = (await call('GET', '/customer/rewards', { token: tok({ id: cust[0].id, role: 'customer', customer_id: cust[0].id }) })).body;
+  rec('Demo', 'The first customer can redeem a reward in the customer app', cr.balance >= cr.catalog[0].points_cost, `${cr.balance} points`);
+  rec('Demo', 'Demo visits are never billable', q.get(`SELECT COUNT(*) n FROM pickups WHERE notes='[growth-demo]' AND COALESCE(billable,1)=1`).n === 0);
+  r = await call('POST', '/growth/demo', { token: A });
+  const afterTwice = q.get(`SELECT COUNT(*) n FROM pickups WHERE notes='[growth-demo]'`).n;
+  r = await call('DELETE', '/growth/demo', { token: A });
+  rec('Demo', 'Loading twice does not double up, and Remove takes it all out', r.body.removed_pickups === afterTwice && q.get(`SELECT COUNT(*) n FROM pickups`).n === pickupsBefore && q.get(`SELECT COUNT(*) n FROM invoices`).n === invBefore && !q.get(`SELECT id FROM reward_points WHERE created_by='demo'`), `${afterTwice} demo visits removed`);
+  rec('Demo', 'Real reward points survive removing demo data', q.get(`SELECT SUM(points) s FROM reward_points WHERE customer_id=?`, c1.id).s > 0);
+
   const failed = results.filter(x => !x.ok);
   console.log(`\nSUMMARY: ${results.length - failed.length} passed, ${failed.length} failed`);
   process.exit(failed.length ? 1 : 0);
