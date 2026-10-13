@@ -17,6 +17,7 @@ const { mountPushRoutes } = require('./push-api');
 const { mountFleetMaintenanceRoutes } = require('./fleet-maintenance');
 const { mountDriverShiftRoutes } = require('./driver-shift');
 const v3 = require('./v3');
+const growth = require('./growth');   // health score, green rewards, waste scanner
 const scheduler = require('./services/scheduler');
 const sla = require('./services/sla');
 
@@ -55,6 +56,7 @@ mountPushRoutes(apiRouter, io);
 mountFleetMaintenanceRoutes(apiRouter, io);
 mountDriverShiftRoutes(apiRouter, io);
 v3.mountV3Routes(apiRouter, io);
+growth.mountGrowthRoutes(apiRouter, io);
 // Brute-force protection on every sign-in route (failed attempts → lockout).
 const L = (name, opts) => security.loginThrottle(name, opts);
 app.use('/api/v1/auth/admin-login', L('admin', { max: 5, idFrom: (r) => r.body && r.body.username }));
@@ -62,6 +64,8 @@ app.use('/api/v1/auth/driver-login', L('driver', { max: 8 }));
 app.use('/api/v1/auth/customer-login', L('customer', { max: 5, idFrom: (r) => r.body && r.body.phone }));
 app.use('/api/v1/auth/customer-otp/verify', L('otp', { max: 5, idFrom: (r) => r.body && r.body.identifier }));
 app.use('/api/v1/auth/customer-otp/request', security.rateLimit('otpsend', { max: 3, windowMs: 15 * 60e3, idFrom: (r) => r.body && r.body.identifier }));
+// Waste scanner: the photo travels as a data URL, so it is handled before the text-length guard.
+app.post('/api/v1/customer/scan', security.rateLimit('wastescan', { max: 30, windowMs: 60 * 60e3 }), ...growth.scanRoute);
 app.use('/api/v1', security.limitTextFields, security.signUploadLinks, v3.guard, apiRouter);
 // public quotation link used in quotation emails (and WhatsApp fallback)
 app.get('/q/:token', (req, res) => res.redirect('/api/v1/public/quotations/' + encodeURIComponent(req.params.token)));
@@ -139,6 +143,7 @@ async function boot() {
   try {
     sla.start(io);
     v3.start(io);
+    growth.startHealth();
   } catch (e) {
     console.warn('SLA:', e.message);
   }

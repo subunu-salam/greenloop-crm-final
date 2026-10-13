@@ -58,6 +58,16 @@ Expo / React Native version of the driver app — same API contract, installable
 6. Go to **Vehicles** → *Onboard vehicle* (TRUCK-03, zone Downtown, capacity 15) → **Ledger** → *Generate month schedule* (next month, or force) → loads rebalance across 3 trucks.
 7. **Dashboard** → *run SLA check now* (after the 12:00 cutoff) → pending stops flip to OVERDUE with critical alerts.
 
+## Growth modules (v3.6)
+Three add-ons in `server/growth.js`, with screens in `public/*/growth.js`. Existing features are not changed.
+
+- **Customer health** (CRM → Customers & billing): every active site gets a 0-100 score each night from missed pickups (60 days), disputed visits (90 days), overdue invoices and a drop in pickups against the customer's usual. Healthy 70+, Watch 40-69, At risk below 40. Moving into At risk raises a CRM alert; sales can mark the account as contacted with a note.
+- **Green rewards** (driver app, customer app, CRM): at the Report step the driver taps Good / OK / Poor for waste separation. Good and OK earn points (default 10 and 5, monthly cap 200, editable). Customers redeem points for invoice discounts; the owner approves, applies the discount to the next invoice and marks it applied (declining returns the points). Customers see their rank and a zone leaderboard.
+- **Waste scanner** (customer app Today screen, CRM → Sales → Waste scans): the customer photographs their waste and gets the waste type, separation tips and the suggested service with an estimate. "Request a quotation" creates a lead (source `ai_scan`) with the site and details filled in. Hazardous and electronic waste are flagged for special handling. The owner decides which service each waste type maps to.
+  Photo recognition needs `ANTHROPIC_API_KEY` (optional `ANTHROPIC_MODEL`) or `OPENAI_API_KEY` (optional `OPENAI_VISION_MODEL`). Without a key the customer picks the waste types by hand and still gets the estimate.
+
+Tests: `node test/unit/growth.test.js` (also part of `npm test`).
+
 ## Configuration
 - `PORT` (default 3000), `JWT_SECRET` (set in production!), `DB_PATH` (SQLite file location)
 - Shift cutoff: `PUT /api/v1/settings { "shift_cutoff": "12:00" }` (also drives the SLA monitor)
