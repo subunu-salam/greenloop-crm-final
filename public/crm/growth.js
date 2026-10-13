@@ -25,17 +25,36 @@ const dmyT = s => { const m = /^(\d{4})-(\d{2})-(\d{2})[ T]?(\d{2}:\d{2})?/.exec
 const scoreBar = s => `<div style="display:flex;align-items:center;gap:8px"><b style="min-width:26px">${s}</b>
   <div style="flex:1;min-width:70px;height:6px;border-radius:4px;background:var(--glass2)"><i style="display:block;height:100%;width:${s}%;border-radius:4px;background:${s >= 70 ? 'var(--green)' : s >= 40 ? 'var(--amber)' : 'var(--red)'}"></i></div></div>`;
 
+// Demo data buttons (owner): fill or clear Customer health and Green rewards for a sales demo
+let demoLoaded = null;
+async function demoButtons(page) {
+  if (CRM_ROLE !== 'owner') return '';
+  try { demoLoaded = (await api('/growth/demo')).loaded; } catch { demoLoaded = false; }
+  return demoLoaded
+    ? `<button class="btn ghost" onclick="clearDemoData('${page}')">${icon('x', 13)} Remove demo data</button>`
+    : `<button class="btn ghost" onclick="loadDemoData('${page}')">${icon('sparkle', 13)} Load demo data</button>`;
+}
+async function loadDemoData(page) {
+  try { const r = await api('/growth/demo', { method: 'POST' }); toast(`Demo data loaded. Customer app demo: ${r.demo_customer}`, 'success'); window[page](); }
+  catch (e) { toast(e.message, 'critical'); }
+}
+async function clearDemoData(page) {
+  if (!confirm('Remove all demo pickups, invoices and reward points?')) return;
+  try { await api('/growth/demo', { method: 'DELETE' }); toast('Demo data removed', 'success'); window[page](); }
+  catch (e) { toast(e.message, 'critical'); }
+}
+
 // ══ CUSTOMER HEALTH ══════════════════════════════════════════
 let healthBand = 'risk';
 async function customerHealth() {
-  const d = await api('/health-scores');
+  const [d, demoBtn] = await Promise.all([api('/health-scores'), demoButtons('customerHealth')]);
   const rows = d.rows.filter(h => healthBand === 'all' ? true : healthBand === 'risk' ? h.band !== 'healthy' : h.band === healthBand);
   const tab = (k, l) => `<button class="ptab ${healthBand === k ? 'on' : ''}" onclick="healthBand='${k}';customerHealth()">${l}</button>`;
   $('#main').innerHTML = `
     <div class="head">
       <div><h1>Customer health</h1>
       <p class="sub">Score from 0 to 100 for each site, worked out every night from missed pickups, disputes, overdue invoices and booking drops. Last run ${dmyT(d.last_run)}.</p></div>
-      <button class="btn ghost" onclick="recalcHealth()">${icon('refresh', 13)} Recalculate now</button>
+      <div class="row" style="gap:8px">${demoBtn}<button class="btn ghost" onclick="recalcHealth()">${icon('refresh', 13)} Recalculate now</button></div>
     </div>
     <div class="kpis">
       <div class="kpi red"><div class="num">${d.summary.at_risk}</div><div class="lbl">${icon('alertTriangle', 13)} At risk (below 40)</div></div>
@@ -74,7 +93,7 @@ async function saveHealthContact(id) {
 
 // ══ GREEN REWARDS ════════════════════════════════════════════
 async function greenRewards() {
-  const d = await api('/rewards/overview');
+  const [d, demoBtn] = await Promise.all([api('/rewards/overview'), demoButtons('greenRewards')]);
   const owner = CRM_ROLE === 'owner';
   const rt = d.ratings || {};
   const rated = (rt.good || 0) + (rt.average || 0) + (rt.poor || 0);
@@ -85,7 +104,8 @@ async function greenRewards() {
     : x.status === 'approved' ? `<button class="btn primary small" onclick="decideReward(${x.id},'applied')">Applied to invoice</button>` : '';
   $('#main').innerHTML = `
     <div class="head"><div><h1>Green rewards</h1>
-      <p class="sub">Drivers rate segregation at each finished pickup. Customers earn points and swap them for invoice discounts.</p></div></div>
+      <p class="sub">Drivers rate segregation at each finished pickup. Customers earn points and swap them for invoice discounts.</p></div>
+      <div class="row" style="gap:8px">${demoBtn}</div></div>
     <div class="kpis">
       <div class="kpi green"><div class="num">${d.issued_this_month}</div><div class="lbl">${icon('gift', 13)} Points earned this month</div></div>
       <div class="kpi blue"><div class="num">${goodPct}%</div><div class="lbl">${icon('checkCircle', 13)} Pickups rated Good</div></div>
