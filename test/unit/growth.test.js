@@ -83,14 +83,14 @@ const today = ymd();
 
   r = await call('GET', '/customer/rewards', { token: C1 });
   const cat = r.body.catalog;
-  rec('Rewards', 'Customer sees balance, history, rewards and leaderboard', r.body.balance === 25 && r.body.history.length >= 3 && cat.length === 3 && r.body.leaderboard.my_rank === 1, `rank ${r.body.leaderboard.my_rank} of ${r.body.leaderboard.of}`);
+  rec('Rewards', 'Customer sees balance, history, rewards and leaderboard (no-cost perks only by default)', r.body.balance === 25 && r.body.history.length >= 3 && cat.length === 3 && cat.every(c => c.kind === 'perk' && c.discount_aed === 0) && r.body.leaderboard.my_rank === 1, `rank ${r.body.leaderboard.my_rank} of ${r.body.leaderboard.of}`);
   rec('Rewards', 'Leaderboard ranks zones and marks the customer\'s own zone', r.body.leaderboard.zones.length === 3 && r.body.leaderboard.zones.filter(z => z.mine).length === 1);
   r = await call('POST', '/customer/rewards/redeem', { token: C1, body: { reward_id: cat[0].id } });
-  rec('Rewards', 'Not enough points: the request is refused with how many are missing', r.status === 409 && /225 more points/.test(r.body.error), r.body.error);
+  rec('Rewards', 'Not enough points: the request is refused with how many are missing', r.status === 409 && /75 more points/.test(r.body.error), r.body.error);
 
   q.run(`INSERT INTO reward_points(customer_id,points,kind,reason) VALUES (?,?,?,?)`, c1.id, 300, 'adjust', 'test top-up');
   r = await call('POST', '/customer/rewards/redeem', { token: C1, body: { reward_id: cat[0].id } });
-  rec('Rewards', 'Redeeming takes the points and creates a request for the office', r.status === 200 && r.body.balance === 75 && q.get(`SELECT status FROM reward_redemptions WHERE id=?`, r.body.id).status === 'requested');
+  rec('Rewards', 'Redeeming takes the points and creates a request for the office', r.status === 200 && r.body.balance === 225 && q.get(`SELECT status FROM reward_redemptions WHERE id=?`, r.body.id).status === 'requested');
   const redId = r.body.id;
   r = await call('GET', '/rewards/overview', { token: OPS });
   rec('Rewards', 'Office sees the request at the top of the list', r.status === 200 && r.body.redemptions[0].id === redId && r.body.ratings.good >= 3, `ratings ${JSON.stringify(r.body.ratings)}`);
@@ -102,8 +102,10 @@ const today = ymd();
   await call('POST', `/rewards/redemptions/${r.body.id}/decide`, { token: A, body: { action: 'approve' } });
   const ap = await call('POST', `/rewards/redemptions/${r.body.id}/decide`, { token: A, body: { action: 'applied' } });
   rec('Rewards', 'Approved, then marked as applied to the invoice', ap.status === 200 && q.get(`SELECT status FROM reward_redemptions WHERE id=?`, r.body.id).status === 'applied');
+  r = await call('POST', '/rewards/catalog', { token: A, body: { name: 'Free bin wash', points_cost: 400, discount_aed: 0 } });
+  rec('Rewards', 'Owner can add a no-cost reward', r.status === 200 && (await call('GET', '/customer/rewards', { token: C2 })).body.catalog.length === 4);
   r = await call('POST', '/rewards/catalog', { token: A, body: { name: 'AED 100 off', points_cost: 900, discount_aed: 100 } });
-  rec('Rewards', 'Owner can add a reward', r.status === 200 && (await call('GET', '/customer/rewards', { token: C2 })).body.catalog.length === 4);
+  rec('Rewards', 'Money-off rewards stay hidden while discounts are switched off', r.status === 200 && (await call('GET', '/customer/rewards', { token: C2 })).body.catalog.length === 4);
 
   // ══ WASTE SCANNER ══
   delete process.env.ANTHROPIC_API_KEY; delete process.env.OPENAI_API_KEY;

@@ -40,6 +40,7 @@ require(SRV + 'fleet-maintenance').mountFleetMaintenanceRoutes(router, io);
 require(SRV + 'driver-shift').mountDriverShiftRoutes(router, io);
 require(SRV + 'ai-api').mountAiRoutes(router, io);   // v3.5 AI insights
 require(SRV + 'growth').mountGrowthRoutes(router, io);   // health score, rewards, waste scanner
+require(SRV + 'care').mountCareRoutes(router, io);       // issues, visit history, follow-up
 const tok = p => 'T.' + Buffer.from(JSON.stringify(p)).toString('base64');
 function match(route, m, url) {
   if (route.m !== m) return null;

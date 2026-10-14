@@ -42,7 +42,7 @@
     const cards = `
       <div class="card gr-card" onclick="openRewards()" role="button" tabindex="0">
         <div class="gr-ic" style="background:rgba(34,197,94,.18);color:var(--green)">${sv('gift')}</div>
-        <div class="gr-tx"><b>Green rewards</b><small>${rw ? (rw.leaderboard.my_rank ? `Rank ${rw.leaderboard.my_rank} of ${rw.leaderboard.of} this month · ` : '') + 'Earn points for well-separated waste' : 'Earn points for well-separated waste'}</small></div>
+        <div class="gr-tx"><b>Green rewards</b><small>${rw ? `${rw.tier ? rw.tier.name + ' tier · ' : ''}${rw.leaderboard.my_rank ? `rank ${rw.leaderboard.my_rank} of ${rw.leaderboard.of} this month` : 'earn points for well-separated waste'}` : 'Earn points for well-separated waste'}</small></div>
         <div class="gr-pts">${rw ? rw.balance : '–'}</div>
       </div>
       <div class="card gr-card" onclick="openScanner()" role="button" tabindex="0">
@@ -50,7 +50,7 @@
         <div class="gr-tx"><b>Scan your waste</b><small>Take a photo to see the waste type, tips and a price estimate</small></div>
       </div>`;
     const kpis = el.querySelector('.kpi-row');
-    if (el.querySelector('.gr-card')) return;      // two loads raced: cards are already there
+    if (el.querySelector('.gr-pts')) return;       // two loads raced: cards are already there
     if (kpis) kpis.insertAdjacentHTML('beforebegin', cards); else el.insertAdjacentHTML('beforeend', cards);
   };
   // app.js shows the Today screen before this file loads: draw it again with the cards

@@ -58,6 +58,16 @@ Expo / React Native version of the driver app — same API contract, installable
 6. Go to **Vehicles** → *Onboard vehicle* (TRUCK-03, zone Downtown, capacity 15) → **Ledger** → *Generate month schedule* (next month, or force) → loads rebalance across 3 trucks.
 7. **Dashboard** → *run SLA check now* (after the 12:00 cutoff) → pending stops flip to OVERDUE with critical alerts.
 
+## Customer care and zero-cost rewards (v3.7)
+`server/care.js` + `public/{crm,customer}/care.js`, with changes to `server/growth.js` and `public/*/growth.js`.
+
+- **Customer issues**: customers report a problem in the app (missed pickup, mess left behind, driver, bin, bill, schedule, other), optionally on a specific visit and with a photo. CRM → Customer issues shows Open / In progress / Resolved, response targets and overdue flags; replies notify the customer, and a customer reply reopens a resolved issue. Open issues lower the health score.
+- **Visit history**: every visit grouped as Completed, Upcoming, Missed, Not picked up (awaiting confirmation / confirmed), Disputed and Rescheduled, with counts, a reliability %, filters and "Report a problem" per visit. Customer app: Proof tab → All visits. CRM: "Visits" on Customer health and issues.
+- **Health follow-up**: Log contact (phone, WhatsApp, visit, email) with a status (Contacted, Follow-up scheduled, Resolved, Could not reach), a follow-up date and a full contact log. Follow-ups due today are listed at the top of Customer health.
+- **Green rewards, no cost to the client**: tiers (Seedling, Sapling, Tree, Forest) from the share of Good-rated pickups over 90 days. Perks: priority for extra-pickup requests (Bookings list), faster issue response (24 h / 12 h / 4 h), a monthly sustainability certificate with an estimated impact (kg kept out of landfill, CO2e avoided) and a Green Partner badge, streaks and badges. The reward list defaults to no-cost perks; money-off rewards are off unless the owner switches them on, and are then capped by a monthly budget. Impact factors are editable in CRM → Green rewards → Rules.
+
+Tests: `node test/unit/care.test.js` (also part of `npm test`).
+
 ## Growth modules (v3.6)
 Three add-ons in `server/growth.js`, with screens in `public/*/growth.js`. Existing features are not changed.
 
