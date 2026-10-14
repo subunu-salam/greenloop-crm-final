@@ -19,6 +19,7 @@ const { mountDriverShiftRoutes } = require('./driver-shift');
 const v3 = require('./v3');
 const growth = require('./growth');   // health score, green rewards, waste scanner
 const care = require('./care');       // customer issues, visit history, health follow-up
+const engage = require('./engage');   // visit ratings, busy periods, weekly email
 const scheduler = require('./services/scheduler');
 const sla = require('./services/sla');
 
@@ -59,6 +60,7 @@ mountDriverShiftRoutes(apiRouter, io);
 v3.mountV3Routes(apiRouter, io);
 growth.mountGrowthRoutes(apiRouter, io);
 care.mountCareRoutes(apiRouter, io);
+engage.mountEngageRoutes(apiRouter, io);
 // Brute-force protection on every sign-in route (failed attempts → lockout).
 const L = (name, opts) => security.loginThrottle(name, opts);
 app.use('/api/v1/auth/admin-login', L('admin', { max: 5, idFrom: (r) => r.body && r.body.username }));
@@ -147,6 +149,7 @@ async function boot() {
     sla.start(io);
     v3.start(io);
     growth.startHealth();
+    engage.startWeekly();
   } catch (e) {
     console.warn('SLA:', e.message);
   }

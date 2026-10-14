@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS issue_messages (
   issue_id INTEGER NOT NULL, author_role TEXT NOT NULL, author_name TEXT, body TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS visit_ratings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pickup_id INTEGER NOT NULL UNIQUE, customer_id INTEGER NOT NULL, driver_id INTEGER,
+  stars INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5), comment TEXT,
+  followed_up_at TEXT, followed_up_by TEXT, follow_up_note TEXT, is_demo INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS health_contacts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   customer_id INTEGER NOT NULL, method TEXT NOT NULL, note TEXT, contact_status TEXT NOT NULL,
@@ -169,13 +176,14 @@ function visitHistory(siteIds, { from, to, category } = {}) {
   const ids = siteIds.map(Number).filter(Boolean).join(',') || '0';
   const rows = q.all(`SELECT p.id, p.customer_id, p.scheduled_date, p.status, p.confirmation_status, p.anomaly_reason, p.completed_at, p.photo_url,
       p.notes, p.time_window, p.segregation_rating, p.service_type, c.branch, c.name, u.full_name driver_name, st.name service_name,
-      (SELECT id FROM customer_issues WHERE pickup_id=p.id ORDER BY id DESC LIMIT 1) issue_id
+      (SELECT id FROM customer_issues WHERE pickup_id=p.id ORDER BY id DESC LIMIT 1) issue_id,
+      (SELECT stars FROM visit_ratings WHERE pickup_id=p.id) stars
     FROM pickups p JOIN customers c ON c.id=p.customer_id LEFT JOIN users u ON u.id=p.driver_id LEFT JOIN service_types st ON st.code=p.service_type
     WHERE p.customer_id IN (${ids}) AND p.scheduled_date BETWEEN ? AND ? ORDER BY p.scheduled_date DESC, p.id DESC LIMIT 500`, f, t);
   const summary = Object.fromEntries(Object.keys(CAT_LABEL).map(k => [k, 0]));
   const out = rows.map(p => { const cat = visitCategory(p, today); summary[cat]++;
     return { id: p.id, site_id: p.customer_id, branch: p.branch, date: p.scheduled_date, category: cat, label: CAT_LABEL[cat], detail: visitDetail(p, cat),
-      driver: p.driver_name, service: p.service_name || p.service_type, photo_url: p.photo_url, segregation: p.segregation_rating, issue_id: p.issue_id }; });
+      driver: p.driver_name, service: p.service_name || p.service_type, photo_url: p.photo_url, segregation: p.segregation_rating, issue_id: p.issue_id, stars: p.stars ?? null }; });
   const done = summary.completed, due = done + summary.missed + summary.cancelled + summary.awaiting + summary.disputed;
   return { from: f, to: t, summary, reliability: due ? Math.round(100 * done / due) : null,
     rows: category && CAT_LABEL[category] ? out.filter(r => r.category === category) : out };
