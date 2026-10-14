@@ -1175,7 +1175,16 @@ function mountV3Routes(r, io) {
   });
 
   // ── One-off bookings (CUS-07) ──
-  r.get('/bookings', staff, (req, res) => res.json(q.all(`SELECT b.*, c.name, c.branch, c.zone FROM bookings b JOIN customers c ON c.id=b.customer_id ORDER BY b.status='requested' DESC, b.date`)));
+  r.get('/bookings', staff, (req, res) => {
+    const rows = q.all(`SELECT b.*, c.name, c.branch, c.zone FROM bookings b JOIN customers c ON c.id=b.customer_id ORDER BY b.status='requested' DESC, b.date`);
+    // Green rewards perk: requests from Tree / Forest sites go first (lazy require: growth.js loads after this file)
+    let tierOf = null; try { tierOf = require('./growth').tierOf; } catch { tierOf = null; }
+    if (!tierOf) return res.json(rows);
+    const t = {}; rows.forEach(b => { if (!(b.customer_id in t)) t[b.customer_id] = tierOf(b.customer_id); });
+    const out = rows.map(b => ({ ...b, tier: t[b.customer_id].name, priority: b.status === 'requested' && t[b.customer_id].level >= 3 }));
+    out.sort((a, b) => (b.status === 'requested') - (a.status === 'requested') || b.priority - a.priority);
+    res.json(out);
+  });
   r.post('/bookings/:id/decide', staff, (req, res) => {
     const b = q.get(`SELECT * FROM bookings WHERE id=?`, req.params.id);
     if (!b || b.status !== 'requested') return res.status(404).json({ error: 'Booking not open' });

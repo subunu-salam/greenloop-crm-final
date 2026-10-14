@@ -28,7 +28,7 @@ const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 // ── auth (same token rules as v3) ────────────────────────────
 const need = (...roles) => (req, res, next) => {
   const h = req.headers.authorization || '';
-  const t = h.startsWith('Bearer ') ? h.slice(7) : null;
+  const t = h.startsWith('Bearer ') ? h.slice(7) : (req.query && req.query.t) || null;
   let p = null;
   try { p = t ? jwt.verify(t, SECRET) : null; } catch { p = null; }
   if (!p) return res.status(401).json({ error: 'Missing or invalid token' });
@@ -99,6 +99,22 @@ CREATE TABLE IF NOT EXISTS waste_scans (
     [['AED 25 off your next invoice', 250, 25], ['AED 60 off your next invoice', 500, 60], ['One free extra pickup', 800, 150]]
       .forEach(([n, p, d]) => q.run(`INSERT INTO rewards_catalog(name,points_cost,discount_aed) VALUES (?,?,?)`, n, p, d));
   }
+  // v3.7: rewards that cost the client nothing ("perk") vs money off ("discount", off by default, budget-capped)
+  tryRun(`ALTER TABLE rewards_catalog ADD COLUMN kind TEXT`);
+  tryRun(`ALTER TABLE rewards_catalog ADD COLUMN description TEXT`);
+  q.run(`UPDATE rewards_catalog SET kind=CASE WHEN discount_aed>0 THEN 'discount' ELSE 'perk' END WHERE kind IS NULL`);
+  if (!q.get(`SELECT id FROM rewards_catalog WHERE kind='perk' LIMIT 1`)) {
+    [['Priority slot for your next extra pickup', 100, 'Your next extra pickup request goes to the top of the queue and you choose the time window.'],
+     ['Waste audit report for your site', 150, 'A one-page report of what you throw away, how well it is separated and where you can cut volume.'],
+     ['Featured as a Green Partner of the month', 250, 'Your business is named on the GreenLoop Green Partners list and in our monthly social post.']]
+      .forEach(([n, p, d]) => q.run(`INSERT INTO rewards_catalog(name,points_cost,discount_aed,kind,description) VALUES (?,?,0,'perk',?)`, n, p, d));
+  }
+  if (!getSetting('rewards_discounts_enabled', '')) setSetting('rewards_discounts_enabled', '0');
+  if (!getSetting('rewards_monthly_budget_aed', '')) setSetting('rewards_monthly_budget_aed', '500');
+  if (!getSetting('impact_kg_per_visit', '')) setSetting('impact_kg_per_visit', '120');
+  if (!getSetting('impact_co2_per_kg', '')) setSetting('impact_co2_per_kg', '0.7');
+  tryRun(`ALTER TABLE health_scores ADD COLUMN contact_status TEXT`);
+  tryRun(`ALTER TABLE health_scores ADD COLUMN follow_up_at TEXT`);
   if (!q.get(`SELECT category FROM waste_scan_rules LIMIT 1`)) {
     [
       ['plastic', 'Plastic', 'WASTE', 0, 'Rinse bottles and containers, flatten them and keep them out of food waste.'],
@@ -134,6 +150,8 @@ function scoreCustomer(c, today = ymd()) {
   const drop = usual >= 2 ? Math.round(100 * (usual - recent) / usual) : 0;
   const goodRatings = q.get(`SELECT COUNT(*) n FROM pickups WHERE customer_id=? AND segregation_rating='good' AND scheduled_date>?`, c.id, d30).n;
   const redeemed = q.get(`SELECT COUNT(*) n FROM reward_redemptions WHERE customer_id=? AND created_at>=?`, c.id, d90).n;
+  let openIssues = 0;
+  try { openIssues = q.get(`SELECT COUNT(*) n FROM customer_issues WHERE customer_id=? AND status IN ('open','in_progress')`, c.id).n; } catch { /* table not created yet */ }
 
   let score = 100; const reasons = [];
   const take = (pts, why) => { if (pts > 0) { score -= pts; reasons.push(why); } };
@@ -141,6 +159,7 @@ function scoreCustomer(c, today = ymd()) {
   take(Math.min(30, complaints * 15), `${complaints} disputed visit${complaints === 1 ? '' : 's'} in 90 days`);
   if (overdueInv.length) take(Math.min(30, 15 + (overdueInv.length - 1) * 8 + Math.floor(overdueAmt / 500) * 2),
     `${overdueInv.length} overdue invoice${overdueInv.length === 1 ? '' : 's'} (AED ${overdueAmt.toFixed(2)})`);
+  take(Math.min(24, openIssues * 12), `${openIssues} open issue${openIssues === 1 ? '' : 's'} raised by the customer`);
   if (drop >= 40) take(15, `Pickups down ${drop}% on their usual`);
   else if (drop >= 20) take(8, `Pickups down ${drop}% on their usual`);
   let bonus = 0;
@@ -149,31 +168,37 @@ function scoreCustomer(c, today = ymd()) {
   score = clamp(Math.round(score + bonus), 0, 100);
   return { score, band: BAND(score), reasons,
     factors: { missed_60d: missed, disputes_90d: complaints, overdue_invoices: overdueInv.length, overdue_aed: overdueAmt,
-      collected_30d: recent, usual_per_30d: Math.round(usual * 10) / 10, drop_pct: drop, good_segregation_30d: goodRatings, bonus } };
+      collected_30d: recent, usual_per_30d: Math.round(usual * 10) / 10, drop_pct: drop, good_segregation_30d: goodRatings, open_issues: openIssues, bonus } };
 }
 
+function scoreAndStore(c, today, now, notify) {
+  const r = scoreCustomer(c, today);
+  const old = q.get(`SELECT band, band_since FROM health_scores WHERE customer_id=?`, c.id);
+  const changed = !old || old.band !== r.band;
+  q.run(`INSERT INTO health_scores(customer_id,score,band,reasons,factors,prev_band,band_since,computed_at) VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT(customer_id) DO UPDATE SET score=excluded.score, band=excluded.band, reasons=excluded.reasons, factors=excluded.factors,
+      prev_band=CASE WHEN health_scores.band!=excluded.band THEN health_scores.band ELSE health_scores.prev_band END,
+      band_since=CASE WHEN health_scores.band!=excluded.band THEN excluded.band_since ELSE health_scores.band_since END,
+      computed_at=excluded.computed_at,
+      contacted_at=CASE WHEN health_scores.band!=excluded.band AND excluded.band='at_risk' THEN NULL ELSE health_scores.contacted_at END,
+      contact_status=CASE WHEN health_scores.band!=excluded.band AND excluded.band='at_risk' THEN 'not_contacted' ELSE health_scores.contact_status END`,
+    c.id, r.score, r.band, JSON.stringify(r.reasons), JSON.stringify(r.factors), old ? old.band : null, changed ? now : (old.band_since || now), now);
+  const turned = changed && old && r.band === 'at_risk';
+  if (turned && notify) try { v3.alertCrm('HEALTH', 'warning', `At risk: ${c.name} (${c.branch || ''}) — ${r.reasons.join('; ') || 'score ' + r.score}`); } catch { /* ignore */ }
+  return turned;
+}
 function recalcHealth({ notify = true } = {}) {
   const now = new Date().toISOString(), today = ymd();
   const rows = q.all(`SELECT id, name, branch, account_id FROM customers WHERE is_active=1`);
   let newlyAtRisk = 0;
-  for (const c of rows) {
-    const r = scoreCustomer(c, today);
-    const old = q.get(`SELECT band, band_since FROM health_scores WHERE customer_id=?`, c.id);
-    const changed = !old || old.band !== r.band;
-    q.run(`INSERT INTO health_scores(customer_id,score,band,reasons,factors,prev_band,band_since,computed_at) VALUES (?,?,?,?,?,?,?,?)
-      ON CONFLICT(customer_id) DO UPDATE SET score=excluded.score, band=excluded.band, reasons=excluded.reasons, factors=excluded.factors,
-        prev_band=CASE WHEN health_scores.band!=excluded.band THEN health_scores.band ELSE health_scores.prev_band END,
-        band_since=CASE WHEN health_scores.band!=excluded.band THEN excluded.band_since ELSE health_scores.band_since END,
-        computed_at=excluded.computed_at,
-        contacted_at=CASE WHEN health_scores.band!=excluded.band AND excluded.band='at_risk' THEN NULL ELSE health_scores.contacted_at END`,
-      c.id, r.score, r.band, JSON.stringify(r.reasons), JSON.stringify(r.factors), old ? old.band : null, changed ? now : (old.band_since || now), now);
-    if (changed && old && r.band === 'at_risk') {
-      newlyAtRisk++;
-      if (notify) try { v3.alertCrm('HEALTH', 'warning', `At risk: ${c.name} (${c.branch || ''}) — ${r.reasons.join('; ') || 'score ' + r.score}`); } catch { /* ignore */ }
-    }
-  }
+  for (const c of rows) if (scoreAndStore(c, today, now, notify)) newlyAtRisk++;
   setSetting('health_last_run', today);
   return { customers: rows.length, newly_at_risk: newlyAtRisk, computed_at: now };
+}
+// one customer, e.g. right after they raise an issue
+function recalcCustomer(cid, { notify = true } = {}) {
+  const c = q.get(`SELECT id, name, branch, account_id FROM customers WHERE id=? AND is_active=1`, cid);
+  if (c) scoreAndStore(c, ymd(), new Date().toISOString(), notify);
 }
 
 let healthTimer = null;
@@ -226,6 +251,102 @@ function leaderboard(cid) {
     zones: Object.values(zones).map(z => ({ ...z, avg_points: Math.round(z.points / z.sites), mine: z.zone === myZone }))
       .sort((a, b) => b.avg_points - a.avg_points).map((z, i) => ({ ...z, rank: i + 1 })),
   };
+}
+
+// ── Green tiers (zero cost to the client) ──
+// Based on how well waste was separated over the last 90 days, not on how often a
+// site is collected, so a small shop can reach Forest as easily as a hypermarket.
+const TIERS = [
+  { key: 'seedling', name: 'Seedling', min_rate: 0, min_visits: 0, response_h: 24,
+    perks: ['Your impact dashboard', 'Monthly sustainability certificate'] },
+  { key: 'sapling', name: 'Sapling', min_rate: 50, min_visits: 2, response_h: 24,
+    perks: ['Green Partner badge on your certificate'] },
+  { key: 'tree', name: 'Tree', min_rate: 75, min_visits: 4, response_h: 12,
+    perks: ['Extra pickup requests go to the top of the queue', 'Issues answered within 12 hours'] },
+  { key: 'forest', name: 'Forest', min_rate: 90, min_visits: 6, response_h: 4,
+    perks: ['Issues answered within 4 hours', 'Named on the zone leaderboard as a Forest site'] },
+];
+function ratingStats(cid, since) {
+  const r = q.get(`SELECT SUM(segregation_rating='good') good, SUM(segregation_rating='average') average, SUM(segregation_rating='poor') poor
+    FROM pickups WHERE customer_id=? AND status='collected' AND segregation_rating IS NOT NULL AND scheduled_date>=?`, cid, since) || {};
+  const good = r.good || 0, average = r.average || 0, poor = r.poor || 0, rated = good + average + poor;
+  return { good, average, poor, rated, rate: rated ? Math.round(100 * (good + average * 0.5) / rated) : 0 };
+}
+function tierOf(cid) {
+  const st = ratingStats(cid, addDays(ymd(), -90));
+  let i = 0;
+  TIERS.forEach((t, k) => { if (st.rated >= t.min_visits && st.rate >= t.min_rate) i = k; });
+  const t = TIERS[i], next = TIERS[i + 1] || null;
+  return { key: t.key, name: t.name, level: i + 1, response_h: t.response_h, rate: st.rate, rated: st.rated,
+    perks: TIERS.slice(0, i + 1).flatMap(x => x.perks),
+    next: next ? { name: next.name, min_rate: next.min_rate, min_visits: next.min_visits, perks: next.perks,
+      need: next.min_visits > st.rated ? `${next.min_visits - st.rated} more rated pickup${next.min_visits - st.rated === 1 ? '' : 's'}` + (st.rate < next.min_rate ? ` and a ${next.min_rate}% separation score` : '')
+        : `a ${next.min_rate}% separation score (now ${st.rate}%)` } : null };
+}
+function streaks(cid) {
+  const list = q.all(`SELECT segregation_rating r FROM pickups WHERE customer_id=? AND status='collected' AND segregation_rating IS NOT NULL
+    ORDER BY scheduled_date DESC, id DESC LIMIT 200`, cid).map(x => x.r);
+  let current = 0; while (current < list.length && list[current] === 'good') current++;
+  let best = 0, run = 0; list.forEach(x => { run = x === 'good' ? run + 1 : 0; best = Math.max(best, run); });
+  return { current, best };
+}
+function badgesOf(cid) {
+  const s = streaks(cid), out = [];
+  const anyGood = q.get(`SELECT 1 x FROM pickups WHERE customer_id=? AND segregation_rating='good' LIMIT 1`, cid);
+  out.push({ key: 'first', name: 'First green pickup', earned: !!anyGood, hint: 'Get one pickup rated Good' });
+  out.push({ key: 'streak5', name: '5 in a row', earned: s.best >= 5, hint: '5 Good pickups in a row' });
+  out.push({ key: 'streak10', name: '10 in a row', earned: s.best >= 10, hint: '10 Good pickups in a row' });
+  const months = q.all(`SELECT substr(scheduled_date,1,7) m, COUNT(*) n, SUM(segregation_rating='good') g FROM pickups
+    WHERE customer_id=? AND segregation_rating IS NOT NULL AND scheduled_date>=? GROUP BY m`, cid, addDays(ymd(), -100));
+  out.push({ key: 'perfect', name: 'Perfect month', earned: months.some(m => m.n >= 2 && m.g === m.n), hint: 'Every pickup in a month rated Good' });
+  const lb = leaderboard(cid);
+  const me = q.get(`SELECT zone FROM customers WHERE id=?`, cid) || {};
+  const zoneTop = q.get(`SELECT rp.customer_id id, SUM(rp.points) p FROM reward_points rp JOIN customers c ON c.id=rp.customer_id
+    WHERE rp.kind='earn' AND rp.created_at LIKE ? AND c.zone=? GROUP BY rp.customer_id ORDER BY p DESC LIMIT 1`, ymd().slice(0, 7) + '%', me.zone);
+  out.push({ key: 'champion', name: 'Zone champion', earned: !!(zoneTop && zoneTop.id === cid && zoneTop.p > 0), hint: `Most points in ${me.zone || 'your zone'} this month` });
+  return { streak: s, badges: out, rank: lb.my_rank };
+}
+// Estimated impact. Clearly labelled as an estimate; the factors are editable in the CRM.
+const DIVERT = { good: 0.6, average: 0.35, poor: 0.1, unrated: 0.2 };
+function impactOf(cid, from, to) {
+  const kgPerVisit = Number(getSetting('impact_kg_per_visit', '120')) || 0;
+  const co2PerKg = Number(getSetting('impact_co2_per_kg', '0.7')) || 0;
+  const rows = q.all(`SELECT COALESCE(segregation_rating,'unrated') r, COUNT(*) n FROM pickups WHERE customer_id=? AND status='collected' AND scheduled_date BETWEEN ? AND ? GROUP BY r`, cid, from, to);
+  const visits = rows.reduce((a, x) => a + x.n, 0);
+  const diverted = rows.reduce((a, x) => a + x.n * kgPerVisit * (DIVERT[x.r] ?? 0.2), 0);
+  const co2 = diverted * co2PerKg;
+  return { from, to, visits, collected_kg: Math.round(visits * kgPerVisit), diverted_kg: Math.round(diverted), co2_kg: Math.round(co2),
+    trees: Math.round(co2 / 21), estimate: true,
+    method: `Estimate: ${kgPerVisit} kg per visit; share kept out of landfill by separation rating (good 60%, OK 35%, poor 10%); ${co2PerKg} kg CO2e avoided per kg; one tree absorbs about 21 kg CO2 a year.` };
+}
+const discountsOn = () => getSetting('rewards_discounts_enabled', '0') === '1';
+const discountSpent = month => q.get(`SELECT COALESCE(SUM(discount_aed),0) s FROM reward_redemptions WHERE status!='rejected' AND discount_aed>0 AND created_at LIKE ?`, month + '%').s;
+
+function certificateHtml(cid, month) {
+  const c = q.get(`SELECT * FROM customers WHERE id=?`, cid);
+  const from = month + '-01', to = month === ymd().slice(0, 7) ? ymd() : ymd(new Date(Date.UTC(+month.slice(0, 4), +month.slice(5, 7), 0)));
+  const im = impactOf(cid, from, to), tier = tierOf(cid), st = ratingStats(cid, from);
+  const h = s => String(s ?? '').replace(/[&<>"]/g, x => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[x]));
+  const label = new Date(from + 'T00:00:00Z').toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const partner = tier.level >= 2;
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Sustainability certificate ${h(label)}</title>
+<style>@page{size:A4 landscape;margin:0}*{box-sizing:border-box}body{margin:0;font-family:'Segoe UI',system-ui,sans-serif;color:#12312a;background:#eef5f1}
+.c{width:297mm;height:210mm;padding:18mm 22mm;background:#fff;margin:auto;position:relative;border:10px solid #0f766e;display:flex;flex-direction:column}
+.top{display:flex;justify-content:space-between;align-items:flex-start}.brand{font-size:22px;font-weight:800;color:#0f766e}.brand small{display:block;font-size:11px;color:#5b7a71;font-weight:600}
+.badge{border:2px solid #0f766e;color:#0f766e;border-radius:40px;padding:6px 16px;font-weight:800;font-size:13px}
+h1{font-size:34px;margin:16mm 0 2mm;letter-spacing:.5px}h2{font-size:26px;margin:2mm 0 8mm;color:#0f766e}
+p{font-size:14px;line-height:1.55;margin:0 0 4mm;max-width:220mm}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8mm;margin:6mm 0}
+.k{border-top:3px solid #14b8a6;padding-top:3mm}.k b{display:block;font-size:28px}.k span{font-size:12px;color:#5b7a71}
+.foot{margin-top:auto;display:flex;justify-content:space-between;font-size:10.5px;color:#5b7a71;gap:20mm}.print{position:fixed;top:10px;right:10px}
+@media print{.print{display:none}body{background:#fff}}</style></head><body>
+<button class="print" onclick="print()">Print / save as PDF</button>
+<div class="c"><div class="top"><div class="brand">GreenLoop<small>${h(getSetting('company_name', 'Majari / GreenLoop'))}</small></div>
+${partner ? `<div class="badge">GREEN PARTNER · ${h(tier.name.toUpperCase())}</div>` : ''}</div>
+<h1>Sustainability certificate</h1><h2>${h(c.name)}${c.branch ? ' — ' + h(c.branch) : ''}</h2>
+<p>In ${h(label)}, ${h(c.name)} had ${im.visits} waste collection${im.visits === 1 ? '' : 's'} with GreenLoop${st.rated ? ` and scored <b>${st.rate}%</b> on waste separation` : ''}. Separating waste at source keeps recyclable material out of landfill.</p>
+<div class="grid"><div class="k"><b>${im.visits}</b><span>Collections</span></div><div class="k"><b>${im.diverted_kg.toLocaleString('en')} kg</b><span>Kept out of landfill (est.)</span></div>
+<div class="k"><b>${im.co2_kg.toLocaleString('en')} kg</b><span>CO₂e avoided (est.)</span></div><div class="k"><b>${im.trees}</b><span>Trees' yearly CO₂ absorption</span></div></div>
+<div class="foot"><span>${h(im.method)}</span><span>Issued ${h(ymd().split('-').reverse().join('/'))}<br>Certificate GL-${cid}-${month.replace('-', '')}</span></div></div></body></html>`;
 }
 
 // ═════════════ 3. AI WASTE SCANNER ══════════════════════════
@@ -343,6 +464,7 @@ function clearDemo() {
   q.run(`DELETE FROM alerts WHERE pickup_id IN (${list})`);
   q.run(`DELETE FROM pickups WHERE id IN (${list})`);
   q.run(`UPDATE health_scores SET contacted_at=NULL, contacted_by=NULL, contact_note=NULL WHERE contacted_by='Sales team' AND contact_note LIKE 'Called store manager, agreed extra Thursday pickup'`);
+  try { require('./care').clearCareDemo(); } catch (e) { if (!/Cannot find module/.test(e.message)) throw e; }
   recalcHealth({ notify: false });
   return { removed_pickups: ids.length };
 }
@@ -425,6 +547,7 @@ function seedDemo() {
     redeem(cs[15 % cs.length], cat[0], 'approved');
     redeem(cs[18 % cs.length], cat[Math.min(1, cat.length - 1)], 'applied');
   }
+  try { require('./care').seedCareDemo(cs, { risk, watch, drop, job }); recalcHealth({ notify: false }); } catch (e) { if (!/Cannot find module/.test(e.message)) throw e; }
   const s = q.all(`SELECT band, COUNT(*) n FROM health_scores GROUP BY band`);
   return { ok: true, health: Object.fromEntries(s.map(r => [r.band, r.n])), demo_customer: `${cs[0].name} (${cs[0].branch || ''})` };
 }
@@ -478,7 +601,9 @@ function mountGrowthRoutes(r, io) {
       balance: balanceOf(cid), earned_this_month: earnedThisMonth(cid), monthly_cap: Number(getSetting('rewards_monthly_cap', '200')) || 0,
       points: { good: pointsFor('good'), average: pointsFor('average'), poor: pointsFor('poor') },
       history: q.all(`SELECT points, kind, reason, created_at FROM reward_points WHERE customer_id=? ORDER BY id DESC LIMIT 20`, cid),
-      catalog: q.all(`SELECT id, name, points_cost, discount_aed FROM rewards_catalog WHERE is_active=1 ORDER BY points_cost`),
+      catalog: q.all(`SELECT id, name, points_cost, discount_aed, COALESCE(kind,'perk') kind, description FROM rewards_catalog WHERE is_active=1 ${discountsOn() ? '' : "AND COALESCE(kind,'perk')='perk'"} ORDER BY kind='discount', points_cost`),
+      tier: tierOf(cid), tiers: TIERS.map(t => ({ name: t.name, min_rate: t.min_rate, min_visits: t.min_visits, perks: t.perks })),
+      ...badgesOf(cid), impact: impactOf(cid, ymd().slice(0, 7) + '-01', ymd()), impact_year: impactOf(cid, addDays(ymd(), -365), ymd()),
       redemptions: q.all(`SELECT id, reward_name, points, discount_aed, status, created_at FROM reward_redemptions WHERE customer_id=? ORDER BY id DESC LIMIT 10`, cid),
       leaderboard: leaderboard(cid),
     });
@@ -487,6 +612,11 @@ function mountGrowthRoutes(r, io) {
     const cid = custId(req);
     const rw = q.get(`SELECT * FROM rewards_catalog WHERE id=? AND is_active=1`, (req.body || {}).reward_id);
     if (!rw) return res.status(404).json({ error: 'Reward not found' });
+    if ((rw.kind || 'perk') === 'discount') {
+      if (!discountsOn()) return res.status(409).json({ error: 'This reward is not available right now' });
+      const budget = Number(getSetting('rewards_monthly_budget_aed', '0')) || 0;
+      if (budget > 0 && discountSpent(ymd().slice(0, 7)) + rw.discount_aed > budget) return res.status(409).json({ error: 'This month\'s discount rewards are all taken. Try again next month or choose another reward.' });
+    }
     const bal = balanceOf(cid);
     if (bal < rw.points_cost) return res.status(409).json({ error: `You need ${rw.points_cost - bal} more points for this reward` });
     const info = q.run(`INSERT INTO reward_redemptions(customer_id,reward_id,reward_name,points,discount_aed) VALUES (?,?,?,?,?)`, cid, rw.id, rw.name, rw.points_cost, rw.discount_aed);
@@ -495,6 +625,14 @@ function mountGrowthRoutes(r, io) {
     try { v3.alertCrm('REWARD', 'info', `Reward request: ${c.name} (${c.branch || ''}) — ${rw.name}`); } catch { /* ignore */ }
     if (io) io.to('staff').emit('rewards:changed', {});
     res.json({ ok: true, id: Number(info.lastInsertRowid), balance: balanceOf(cid) });
+  });
+
+  // ── Sustainability certificate (customer, or office for any customer) ──
+  const certMonth = m => (/^\d{4}-\d{2}$/.test(String(m || '')) && m <= ymd().slice(0, 7) ? m : ymd().slice(0, 7));
+  r.get('/customer/certificate', cust, (req, res) => res.type('html').send(certificateHtml(custId(req), certMonth(req.query.month))));
+  r.get('/customers/:id/certificate', staff, (req, res) => {
+    if (!q.get(`SELECT id FROM customers WHERE id=?`, req.params.id)) return res.status(404).send('Not found');
+    res.type('html').send(certificateHtml(Number(req.params.id), certMonth(req.query.month)));
   });
 
   // ── Rewards: office ──
@@ -510,6 +648,12 @@ function mountGrowthRoutes(r, io) {
       ratings: q.get(`SELECT SUM(segregation_rating='good') good, SUM(segregation_rating='average') average, SUM(segregation_rating='poor') poor,
         SUM(segregation_rating IS NULL AND status='collected') unrated FROM pickups WHERE scheduled_date LIKE ?`, month + '%'),
       issued_this_month: q.get(`SELECT COALESCE(SUM(points),0) s FROM reward_points WHERE kind='earn' AND created_at LIKE ?`, month + '%').s,
+      tiers: (() => { const n = { seedling: 0, sapling: 0, tree: 0, forest: 0 };
+        q.all(`SELECT id FROM customers WHERE is_active=1`).forEach(c => { n[tierOf(c.id).key]++; }); return TIERS.map(t => ({ key: t.key, name: t.name, sites: n[t.key], perks: t.perks, min_rate: t.min_rate, min_visits: t.min_visits })); })(),
+      discounts: { enabled: discountsOn(), budget_aed: Number(getSetting('rewards_monthly_budget_aed', '0')) || 0, spent_aed: money(discountSpent(month)) },
+      impact: (() => { const ids = q.all(`SELECT id FROM customers WHERE is_active=1`); const a = { diverted_kg: 0, co2_kg: 0, visits: 0 };
+        ids.forEach(c => { const i = impactOf(c.id, month + '-01', ymd()); a.diverted_kg += i.diverted_kg; a.co2_kg += i.co2_kg; a.visits += i.visits; }); return a; })(),
+      impact_factors: { kg_per_visit: Number(getSetting('impact_kg_per_visit', '120')), co2_per_kg: Number(getSetting('impact_co2_per_kg', '0.7')) },
     });
   });
   r.post('/rewards/redemptions/:id/decide', owner, (req, res) => {
@@ -526,7 +670,7 @@ function mountGrowthRoutes(r, io) {
       q.run(`INSERT INTO reward_points(customer_id,points,kind,reason,created_by) VALUES (?,?,?,?,?)`, rr.customer_id, rr.points, 'refund', `Returned: ${rr.reward_name}${note ? ' (' + note + ')' : ''}`, req.user.name || 'owner');
       v3.notifyCustomer(rr.customer_id, 'rewards', 'Reward request declined', `${rr.reward_name}: your ${rr.points} points were returned.${note ? ' ' + note : ''}`, '/customer/#home');
     } else if (next === 'approved') {
-      v3.notifyCustomer(rr.customer_id, 'rewards', 'Reward approved', `${rr.reward_name} will be taken off your next invoice.`, '/customer/#home');
+      v3.notifyCustomer(rr.customer_id, 'rewards', 'Reward approved', rr.discount_aed > 0 ? `${rr.reward_name} will be taken off your next invoice.` : `${rr.reward_name}: our team will be in touch to arrange it.`, '/customer/#home');
     }
     res.json({ ok: true, status: next });
   });
@@ -534,7 +678,8 @@ function mountGrowthRoutes(r, io) {
     const b = req.body || {};
     const name = String(b.name || '').trim().slice(0, 120), cost = Math.round(Number(b.points_cost)), disc = money(b.discount_aed);
     if (!name || !(cost > 0) || !(disc >= 0)) return res.status(400).json({ error: 'Name, points (above 0) and discount are required' });
-    const info = q.run(`INSERT INTO rewards_catalog(name,points_cost,discount_aed) VALUES (?,?,?)`, name, cost, disc);
+    const kind = disc > 0 ? 'discount' : 'perk';
+    const info = q.run(`INSERT INTO rewards_catalog(name,points_cost,discount_aed,kind,description) VALUES (?,?,?,?,?)`, name, cost, disc, kind, String(b.description || '').slice(0, 300));
     res.json({ ok: true, id: Number(info.lastInsertRowid) });
   });
   r.put('/rewards/catalog/:id', owner, (req, res) => {
@@ -543,7 +688,7 @@ function mountGrowthRoutes(r, io) {
     const b = { ...rw, ...(req.body || {}) };
     const cost = Math.round(Number(b.points_cost)), disc = money(b.discount_aed);
     if (!String(b.name || '').trim() || !(cost > 0) || !(disc >= 0)) return res.status(400).json({ error: 'Name, points (above 0) and discount are required' });
-    q.run(`UPDATE rewards_catalog SET name=?, points_cost=?, discount_aed=?, is_active=? WHERE id=?`, String(b.name).trim().slice(0, 120), cost, disc, b.is_active ? 1 : 0, rw.id);
+    q.run(`UPDATE rewards_catalog SET name=?, points_cost=?, discount_aed=?, is_active=?, kind=?, description=? WHERE id=?`, String(b.name).trim().slice(0, 120), cost, disc, b.is_active ? 1 : 0, disc > 0 ? 'discount' : 'perk', String(b.description || '').slice(0, 300), rw.id);
     res.json({ ok: true });
   });
   r.put('/rewards/settings', owner, (req, res) => {
@@ -552,6 +697,10 @@ function mountGrowthRoutes(r, io) {
     if (b.monthly_cap != null && !(Number(b.monthly_cap) >= 0)) return res.status(400).json({ error: 'Monthly cap must be 0 or more (0 = no cap)' });
     for (const k of ['good', 'average', 'poor']) if (b[k] != null) setSetting('rewards_points_' + k, String(Math.round(Number(b[k]))));
     if (b.monthly_cap != null) setSetting('rewards_monthly_cap', String(Math.round(Number(b.monthly_cap))));
+    if (b.discounts_enabled != null) setSetting('rewards_discounts_enabled', b.discounts_enabled ? '1' : '0');
+    if (b.budget_aed != null) { if (!(Number(b.budget_aed) >= 0)) return res.status(400).json({ error: 'Budget must be 0 or more' }); setSetting('rewards_monthly_budget_aed', String(money(b.budget_aed))); }
+    if (b.kg_per_visit != null) { if (!(Number(b.kg_per_visit) > 0)) return res.status(400).json({ error: 'Kg per visit must be above 0' }); setSetting('impact_kg_per_visit', String(Number(b.kg_per_visit))); }
+    if (b.co2_per_kg != null) { if (!(Number(b.co2_per_kg) >= 0)) return res.status(400).json({ error: 'CO2 factor must be 0 or more' }); setSetting('impact_co2_per_kg', String(Number(b.co2_per_kg))); }
     res.json({ ok: true });
   });
 
@@ -613,4 +762,4 @@ ensureSchema();
 // Mounted ahead of the global text-length guard in index.js (the photo is a long data URL).
 const scanRoute = [cust, scanHandler];
 
-module.exports = { mountGrowthRoutes, seedDemo, clearDemo, scanRoute, startHealth, recalcHealth, scoreCustomer, rateSegregation, estimate, leaderboard };
+module.exports = { mountGrowthRoutes, recalcCustomer, tierOf, impactOf, badgesOf, TIERS, seedDemo, clearDemo, scanRoute, startHealth, recalcHealth, scoreCustomer, rateSegregation, estimate, leaderboard };
