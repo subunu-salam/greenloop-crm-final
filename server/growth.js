@@ -150,6 +150,11 @@ function scoreCustomer(c, today = ymd()) {
   const drop = usual >= 2 ? Math.round(100 * (usual - recent) / usual) : 0;
   const goodRatings = q.get(`SELECT COUNT(*) n FROM pickups WHERE customer_id=? AND segregation_rating='good' AND scheduled_date>?`, c.id, d30).n;
   const redeemed = q.get(`SELECT COUNT(*) n FROM reward_redemptions WHERE customer_id=? AND created_at>=?`, c.id, d90).n;
+  let lowRatings = 0, avgRating = null, nRatings = 0;
+  try {
+    const rr = q.get(`SELECT COUNT(*) n, AVG(stars) a, SUM(stars<=2) low FROM visit_ratings WHERE customer_id=? AND substr(created_at,1,10)>=?`, c.id, d60);
+    nRatings = rr.n || 0; avgRating = nRatings ? Math.round(rr.a * 10) / 10 : null; lowRatings = rr.low || 0;
+  } catch { /* ratings module not loaded */ }
   let openIssues = 0;
   try { openIssues = q.get(`SELECT COUNT(*) n FROM customer_issues WHERE customer_id=? AND status IN ('open','in_progress')`, c.id).n; } catch { /* table not created yet */ }
 
@@ -160,15 +165,18 @@ function scoreCustomer(c, today = ymd()) {
   if (overdueInv.length) take(Math.min(30, 15 + (overdueInv.length - 1) * 8 + Math.floor(overdueAmt / 500) * 2),
     `${overdueInv.length} overdue invoice${overdueInv.length === 1 ? '' : 's'} (AED ${overdueAmt.toFixed(2)})`);
   take(Math.min(24, openIssues * 12), `${openIssues} open issue${openIssues === 1 ? '' : 's'} raised by the customer`);
+  take(Math.min(16, lowRatings * 8), `${lowRatings} low visit rating${lowRatings === 1 ? '' : 's'} (1-2 stars) in 60 days`);
+  if (nRatings >= 3 && avgRating < 3.5 && !lowRatings) take(6, `Average visit rating ${avgRating} out of 5`);
   if (drop >= 40) take(15, `Pickups down ${drop}% on their usual`);
   else if (drop >= 20) take(8, `Pickups down ${drop}% on their usual`);
   let bonus = 0;
   if (goodRatings >= 2) bonus += 5;
   if (redeemed) bonus += 3;
+  if (nRatings >= 3 && avgRating >= 4.5) bonus += 3;
   score = clamp(Math.round(score + bonus), 0, 100);
   return { score, band: BAND(score), reasons,
     factors: { missed_60d: missed, disputes_90d: complaints, overdue_invoices: overdueInv.length, overdue_aed: overdueAmt,
-      collected_30d: recent, usual_per_30d: Math.round(usual * 10) / 10, drop_pct: drop, good_segregation_30d: goodRatings, open_issues: openIssues, bonus } };
+      collected_30d: recent, usual_per_30d: Math.round(usual * 10) / 10, drop_pct: drop, good_segregation_30d: goodRatings, open_issues: openIssues, low_ratings_60d: lowRatings, avg_rating_60d: avgRating, bonus } };
 }
 
 function scoreAndStore(c, today, now, notify) {
@@ -465,6 +473,7 @@ function clearDemo() {
   q.run(`DELETE FROM pickups WHERE id IN (${list})`);
   q.run(`UPDATE health_scores SET contacted_at=NULL, contacted_by=NULL, contact_note=NULL WHERE contacted_by='Sales team' AND contact_note LIKE 'Called store manager, agreed extra Thursday pickup'`);
   try { require('./care').clearCareDemo(); } catch (e) { if (!/Cannot find module/.test(e.message)) throw e; }
+  try { require('./engage').clearEngageDemo(); } catch (e) { if (!/Cannot find module/.test(e.message)) throw e; }
   recalcHealth({ notify: false });
   return { removed_pickups: ids.length };
 }
@@ -548,6 +557,7 @@ function seedDemo() {
     redeem(cs[18 % cs.length], cat[Math.min(1, cat.length - 1)], 'applied');
   }
   try { require('./care').seedCareDemo(cs, { risk, watch, drop, job }); recalcHealth({ notify: false }); } catch (e) { if (!/Cannot find module/.test(e.message)) throw e; }
+  try { require('./engage').seedEngageDemo(cs, { risk, watch }); recalcHealth({ notify: false }); } catch (e) { if (!/Cannot find module/.test(e.message)) throw e; }
   const s = q.all(`SELECT band, COUNT(*) n FROM health_scores GROUP BY band`);
   return { ok: true, health: Object.fromEntries(s.map(r => [r.band, r.n])), demo_customer: `${cs[0].name} (${cs[0].branch || ''})` };
 }

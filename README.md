@@ -58,6 +58,15 @@ Expo / React Native version of the driver app — same API contract, installable
 6. Go to **Vehicles** → *Onboard vehicle* (TRUCK-03, zone Downtown, capacity 15) → **Ledger** → *Generate month schedule* (next month, or force) → loads rebalance across 3 trucks.
 7. **Dashboard** → *run SLA check now* (after the 12:00 cutoff) → pending stops flip to OVERDUE with critical alerts.
 
+## Visit ratings, busy periods and weekly email (v3.8)
+`server/engage.js` + `public/{crm,customer}/engage.js`.
+
+- **Visit ratings**: after a completed pickup the customer gives 1 to 5 stars and an optional comment (Today screen prompt, visit history, visit detail; up to 30 days after). 1-2 stars alert the office and lower the health score. CRM → Visit ratings: low ratings to follow up, averages, share of happy customers and an average per driver.
+- **Busy periods**: customers tap "Expecting more waste?" for Ramadan, Eid, National Day, a sale or a stock clearance, choose the dates and "a bit more" (+1 visit a week) or "a lot more" (+2), see the extra dates and estimated cost, and confirm. Extra visits are created and allocated automatically (UAE holidays and days that already have a visit are skipped) and can be cancelled before they happen. CRM → Busy periods lists them, lets the office plan one for a customer and keeps the suggested UAE dates (editable).
+- **Weekly email**: every Sunday from 08:00 (Asia/Dubai) each account with an email address gets a summary of the last 7 days (pickups done, not completed, open issues, separation score, next pickup, planned busy period). Uses the existing email setup (Resend, Brevo or Gmail). CRM → Weekly emails: preview, test send, send now, who receives it, send log; customers can switch it off in the app (More).
+
+Tests: `node test/unit/engage.test.js` (also part of `npm test`).
+
 ## Customer care and zero-cost rewards (v3.7)
 `server/care.js` + `public/{crm,customer}/care.js`, with changes to `server/growth.js` and `public/*/growth.js`.
 

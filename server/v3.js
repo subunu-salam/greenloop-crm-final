@@ -1758,5 +1758,5 @@ ensureSchema();
 module.exports = {
   mountV3Routes, guard, start, validateProof, rejectProof, onPickupCompleted, onNotPickedUp, notifyCustomer, notifyVehicleDrivers, dmy,
   generatePlans, occursOn, describeRule, calcQuote, visitsPerMonth, frequencyLabel, parseFrequency, recurrenceForLine, haversineM, autoConfirm, atRiskCheck, allocate,
-  alertCrm, flagLateProof, generatePlansBatched, dailyBackup, dailyJobs,
+  alertCrm, flagLateProof, generatePlansBatched, dailyBackup, dailyJobs, createJob,
 };

@@ -61,7 +61,8 @@
         <button class="${vcat === '' ? 'on' : ''}" onclick="setVcat('')"><b>${d.rows.length}</b><span>All</span></button></div>
       <div class="card">${rows.length ? rows.map(v => `<div class="cc-v"><span class="cc-dot" style="background:${COLOR[v.category]}"></span>
         <div class="t"><b>${nice(v.date)} · ${esc(v.label)}</b><small>${esc(v.detail)}${sites.length > 1 ? ' · ' + esc(v.branch || '') : ''}${v.driver ? ' · ' + esc(v.driver) : ''}</small></div>
-        <div class="a">${v.photo_url ? `<button class="btn ghost small" onclick="openDetail(${v.id})">Photo</button>` : ''}
+        <div class="a">${v.category === 'completed' ? (v.stars ? `<span style="color:var(--amber);white-space:nowrap" title="Your rating">${'★'.repeat(v.stars)}<span style="opacity:.3">${'★'.repeat(5 - v.stars)}</span></span>` : (typeof openRateSheet === 'function' && v.date >= addDaysLocal(-30) ? `<button class="btn primary small" onclick="openRateSheet(${v.id}, '${dm(v.date)}')">Rate</button>` : '')) : ''}
+          ${v.photo_url ? `<button class="btn ghost small" onclick="openDetail(${v.id})">Photo</button>` : ''}
           ${v.issue_id ? '<span class="pill gr-approved">Issue raised</span>' : v.category !== 'upcoming' ? `<button class="btn ghost small" onclick="openIssueSheet(${v.id}, '${dm(v.date)}', '${v.category === 'missed' ? 'missed_pickup' : ''}')">Report a problem</button>` : ''}</div></div>`).join('')
         : '<p class="muted">No visits in this group.</p>'}</div>
       <button class="btn ghost full" onclick="openDoc('/customer/history-v3/pdf?from=${hist.from}&to=${hist.to}&print=1')">Download PDF report</button>`;
