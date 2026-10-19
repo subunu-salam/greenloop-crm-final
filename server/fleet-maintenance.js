@@ -13,7 +13,7 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { q } = require('./db');
+const { prisma, join, findById, sortBy, desc, now: sqlNow } = require('./db');
 const security = require('./security');
 const capacity = require('./capacity');
 
@@ -50,36 +50,7 @@ const URGENCY = ['low', 'normal', 'high', 'off_road'];
 const PAY_METHODS = ['cash', 'card', 'transfer', 'cheque', 'fuel_card', 'company_account'];
 const PAID_BY = ['company', 'driver'];
 
-q.run(`CREATE TABLE IF NOT EXISTS vehicle_reports (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  vehicle_id INTEGER NOT NULL REFERENCES vehicles(id),
-  driver_id INTEGER,
-  source TEXT NOT NULL DEFAULT 'driver',
-  category TEXT NOT NULL,
-  urgency TEXT NOT NULL DEFAULT 'normal',
-  description TEXT,
-  odometer_km INTEGER,
-  photo_url TEXT,
-  status TEXT NOT NULL DEFAULT 'open',
-  reported_at TEXT NOT NULL DEFAULT (datetime('now')),
-  service_date TEXT,
-  vendor TEXT,
-  work_done TEXT,
-  cost REAL,
-  paid_by TEXT,
-  payment_method TEXT,
-  payment_ref TEXT,
-  receipt_url TEXT,
-  reimbursed INTEGER NOT NULL DEFAULT 0,
-  next_due_date TEXT,
-  next_due_km INTEGER,
-  admin_note TEXT,
-  resolved_at TEXT,
-  resolved_by TEXT,
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-)`);
-q.run(`CREATE INDEX IF NOT EXISTS ix_vreports_vehicle ON vehicle_reports(vehicle_id, reported_at)`);
-q.run(`CREATE INDEX IF NOT EXISTS ix_vreports_status ON vehicle_reports(status)`);
+// Collection: vehicle_reports (see prisma/schema.prisma).
 
 // ── helpers ──────────────────────────────────────────────────
 function auth(...roles) {
@@ -129,12 +100,20 @@ function view(r) {
     reimbursement_due: r.paid_by === 'driver' && r.cost > 0 && !r.reimbursed && r.status !== 'rejected',
   };
 }
-const SELECT = `SELECT r.*, v.fleet_number, v.plate, u.full_name AS driver
-  FROM vehicle_reports r JOIN vehicles v ON v.id=r.vehicle_id LEFT JOIN users u ON u.id=r.driver_id`;
-const getReport = (id) => view(q.get(`${SELECT} WHERE r.id=?`, id));
+// reports + vehicle fleet number / plate (JOIN) + driver name (LEFT JOIN)
+async function withNames(rows) {
+  rows = await join(rows, 'vehicle_id', 'vehicle', ['fleet_number', 'plate'], { inner: true });
+  return join(rows, 'driver_id', 'user', { driver: 'full_name' });
+}
+const getReport = async (id) => {
+  const r = await prisma.vehicleReport.findUnique({ where: { id } });
+  return r ? view((await withNames([r]))[0]) : null;
+};
+// date a report counts for: COALESCE(service_date, substr(reported_at,1,10))
+const reportDay = (r) => r.service_date || String(r.reported_at).slice(0, 10);
 
-function alertCrm(io, type, severity, message) {
-  q.run(`INSERT INTO alerts(type,severity,message,pickup_id) VALUES (?,?,?,NULL)`, type, severity, message);
+async function alertCrm(io, type, severity, message) {
+  await prisma.alert.create({ data: { type, severity, message, pickup_id: null } });
   if (io) io.to('staff').emit('alert', { type, severity, message });
 }
 function notifyDriver(io, driverId, title, body) {
@@ -143,8 +122,8 @@ function notifyDriver(io, driverId, title, body) {
   if (push) push.sendPush('driver', driverId, title, body, '/driver/#vehicle').catch(() => {});
 }
 
-function vehicleSummary(vehicleId) {
-  const rows = q.all(`SELECT * FROM vehicle_reports WHERE vehicle_id=? AND status!='rejected'`, vehicleId);
+async function vehicleSummary(vehicleId) {
+  const rows = await prisma.vehicleReport.findMany({ where: { vehicle_id: vehicleId, status: { not: 'rejected' } }, orderBy: { id: 'asc' } });
   const month = today().slice(0, 7), year = today().slice(0, 4);
   const when = (r) => r.service_date || String(r.reported_at).slice(0, 10);
   const spend = (f) => money(rows.filter((r) => r.cost > 0 && f(r)).reduce((a, r) => a + r.cost, 0));
@@ -182,13 +161,13 @@ function mountFleetMaintenanceRoutes(r, io) {
   });
 
   // ── DRIVER: report an issue / expense on the assigned vehicle ──
-  r.post('/driver/vehicle-reports', auth('driver'), files, (req, res) => {
+  r.post('/driver/vehicle-reports', auth('driver'), files, async (req, res) => {
     const b = req.body || {};
     const fail = (code, msg) => { dropFiles(req); return res.status(code).json({ error: msg }); };
-    const me = q.get(`SELECT id, full_name, vehicle_id FROM users WHERE id=? AND role='driver' AND is_active=1`, req.user.id);
+    const me = await prisma.user.findFirst({ where: { id: req.user.id, role: 'driver', is_active: 1 }, select: { id: true, full_name: true, vehicle_id: true } });
     if (!me) return fail(403, 'Driver account not active');
     if (!me.vehicle_id) return fail(409, 'No vehicle is assigned to you — ask the office');
-    const v = q.get(`SELECT * FROM vehicles WHERE id=?`, me.vehicle_id);
+    const v = await prisma.vehicle.findUnique({ where: { id: me.vehicle_id } });
     if (!v) return fail(409, 'Assigned vehicle not found');
     if (!CATEGORIES[b.category]) return fail(400, 'Choose what the report is about');
     const urgency = URGENCY.includes(b.urgency) ? b.urgency : 'normal';
@@ -203,12 +182,15 @@ function mountFleetMaintenanceRoutes(r, io) {
     const method = cost > 0 ? (PAY_METHODS.includes(b.payment_method) ? b.payment_method : 'cash') : null;
     const paidBy = cost > 0 ? (method === 'fuel_card' || method === 'company_account' ? 'company' : 'driver') : null;
 
-    const info = q.run(`INSERT INTO vehicle_reports(vehicle_id,driver_id,source,category,urgency,description,odometer_km,photo_url,cost,paid_by,payment_method,receipt_url,service_date)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      v.id, me.id, 'driver', b.category, urgency, txt(b.description), odo, photo, cost || null, paidBy, method, receipt, cost > 0 ? today() : null);
-    const rep = getReport(Number(info.lastInsertRowid));
+    const saved = await prisma.vehicleReport.create({
+      data: {
+        vehicle_id: v.id, driver_id: me.id, source: 'driver', category: b.category, urgency, description: txt(b.description), odometer_km: odo,
+        photo_url: photo, cost: cost || null, paid_by: paidBy, payment_method: method, receipt_url: receipt, service_date: cost > 0 ? today() : null,
+      },
+    });
+    const rep = await getReport(saved.id);
     const sev = urgency === 'off_road' ? 'critical' : urgency === 'high' ? 'warning' : 'info';
-    alertCrm(io, 'VEHICLE_ISSUE', sev,
+    await alertCrm(io, 'VEHICLE_ISSUE', sev,
       `${v.fleet_number}: ${rep.category_label} reported by ${me.full_name}` +
       `${urgency === 'off_road' ? ' — VEHICLE CANNOT DRIVE. Reschedule its stops or set today\'s capacity to 0.' : ''}` +
       `${cost > 0 ? ` · paid AED ${money(cost).toFixed(2)} (${method.replace('_', ' ')})` : ''}${rep.description ? ` · “${rep.description}”` : ''}`);
@@ -216,30 +198,37 @@ function mountFleetMaintenanceRoutes(r, io) {
     res.json({ ok: true, report: rep });
   });
 
-  r.get('/driver/vehicle-reports', auth('driver'), (req, res) => {
-    const me = q.get(`SELECT vehicle_id FROM users WHERE id=?`, req.user.id);
-    const v = me && me.vehicle_id ? q.get(`SELECT id, fleet_number, plate FROM vehicles WHERE id=?`, me.vehicle_id) : null;
+  r.get('/driver/vehicle-reports', auth('driver'), async (req, res) => {
+    const me = await prisma.user.findUnique({ where: { id: req.user.id }, select: { vehicle_id: true } });
+    const v = me && me.vehicle_id ? await prisma.vehicle.findUnique({ where: { id: me.vehicle_id }, select: { id: true, fleet_number: true, plate: true } }) : null;
+    // a driver sees the reports on the current vehicle plus anything they filed themselves
+    const rows = await withNames(await prisma.vehicleReport.findMany({ where: { OR: [{ driver_id: req.user.id }, { vehicle_id: v ? v.id : -1 }] }, orderBy: { id: 'desc' }, take: 40 }));
     res.json({
       vehicle: v,
-      summary: v ? vehicleSummary(v.id) : null,
-      // a driver sees the reports on the current vehicle plus anything they filed themselves
-      rows: q.all(`${SELECT} WHERE r.driver_id=? OR r.vehicle_id=? ORDER BY r.id DESC LIMIT 40`, req.user.id, v ? v.id : -1).map(view),
+      summary: v ? await vehicleSummary(v.id) : null,
+      rows: rows.map(view),
     });
   });
 
   // ── ADMIN: list + dashboard numbers ──
-  r.get('/fleet/maintenance', auth('admin'), (req, res) => {
-    const where = [], args = [];
-    if (req.query.vehicle_id) { where.push('r.vehicle_id=?'); args.push(Number(req.query.vehicle_id)); }
-    if (STATUSES.includes(req.query.status)) { where.push('r.status=?'); args.push(req.query.status); }
-    if (req.query.status === 'active') where.push(`r.status IN ('open','approved','in_progress')`);
-    if (CATEGORIES[req.query.category]) { where.push('r.category=?'); args.push(req.query.category); }
-    if (security.isRealDate(req.query.from || '')) { where.push(`COALESCE(r.service_date, substr(r.reported_at,1,10)) >= ?`); args.push(req.query.from); }
-    if (security.isRealDate(req.query.to || '')) { where.push(`COALESCE(r.service_date, substr(r.reported_at,1,10)) <= ?`); args.push(req.query.to); }
-    const rows = q.all(`${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY
-      CASE r.status WHEN 'open' THEN 0 WHEN 'approved' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END, r.id DESC LIMIT 500`, ...args).map(view);
-    const vehicles = q.all(`SELECT * FROM vehicles ORDER BY fleet_number`).map((v) => ({ id: v.id, fleet_number: v.fleet_number, plate: v.plate, zone: v.zone, is_active: v.is_active, ...vehicleSummary(v.id) }));
-    const all = q.all(`SELECT * FROM vehicle_reports WHERE status!='rejected'`);
+  r.get('/fleet/maintenance', auth('admin'), async (req, res) => {
+    // build the Prisma `where` object step by step (instead of SQL text)
+    const where = {};
+    if (req.query.vehicle_id) where.vehicle_id = Number.isInteger(Number(req.query.vehicle_id)) ? Number(req.query.vehicle_id) : -1;
+    if (STATUSES.includes(req.query.status)) where.status = req.query.status;
+    if (req.query.status === 'active') where.status = { in: ['open', 'approved', 'in_progress'] };
+    if (CATEGORIES[req.query.category]) where.category = req.query.category;
+    let list = await prisma.vehicleReport.findMany({ where });
+    // the date filters use COALESCE(service_date, day of reported_at) → applied in JS
+    if (security.isRealDate(req.query.from || '')) list = list.filter((x) => reportDay(x) >= req.query.from);
+    if (security.isRealDate(req.query.to || '')) list = list.filter((x) => reportDay(x) <= req.query.to);
+    const rank = { open: 0, approved: 1, in_progress: 2 };
+    sortBy(list, (x) => rank[x.status] ?? 3, desc((x) => x.id));
+    const rows = (await withNames(list.slice(0, 500))).map(view);
+    const vehicles = [];
+    for (const v of await prisma.vehicle.findMany({ orderBy: { fleet_number: 'asc' } }))
+      vehicles.push({ id: v.id, fleet_number: v.fleet_number, plate: v.plate, zone: v.zone, is_active: v.is_active, ...(await vehicleSummary(v.id)) });
+    const all = await prisma.vehicleReport.findMany({ where: { status: { not: 'rejected' } } });
     const month = today().slice(0, 7);
     const when = (x) => x.service_date || String(x.reported_at).slice(0, 10);
     const byCat = {};
@@ -260,38 +249,43 @@ function mountFleetMaintenanceRoutes(r, io) {
   });
 
   // full service history of one vehicle
-  r.get('/fleet/maintenance/vehicle/:id', auth('admin'), (req, res) => {
-    const v = q.get(`SELECT * FROM vehicles WHERE id=?`, req.params.id);
+  r.get('/fleet/maintenance/vehicle/:id', auth('admin'), async (req, res) => {
+    const v = await findById('vehicle', req.params.id);
     if (!v) return res.status(404).json({ error: 'Vehicle not found' });
+    const list = sortBy(await prisma.vehicleReport.findMany({ where: { vehicle_id: v.id } }), desc(reportDay), desc((x) => x.id)).slice(0, 500);
     res.json({
-      vehicle: v, summary: vehicleSummary(v.id),
-      history: q.all(`${SELECT} WHERE r.vehicle_id=? ORDER BY COALESCE(r.service_date, substr(r.reported_at,1,10)) DESC, r.id DESC LIMIT 500`, v.id).map(view),
+      vehicle: v, summary: await vehicleSummary(v.id),
+      history: (await withNames(list)).map(view),
     });
   });
 
   // office logs a service / expense directly (e.g. workshop invoice)
-  r.post('/fleet/maintenance', auth('admin'), files, (req, res) => {
+  r.post('/fleet/maintenance', auth('admin'), files, async (req, res) => {
     const b = req.body || {};
     const fail = (code, msg) => { dropFiles(req); return res.status(code).json({ error: msg }); };
-    const v = q.get(`SELECT * FROM vehicles WHERE id=?`, b.vehicle_id);
+    const v = await findById('vehicle', b.vehicle_id);
     if (!v) return fail(400, 'Choose a vehicle');
     if (!CATEGORIES[b.category]) return fail(400, 'Choose a category');
     const p = parseDetails(b);
     if (p.error) return fail(400, p.error);
     const status = STATUSES.includes(b.status) ? b.status : 'resolved';
-    const info = q.run(`INSERT INTO vehicle_reports(vehicle_id,driver_id,source,category,urgency,description,odometer_km,photo_url,status,service_date,vendor,work_done,cost,paid_by,payment_method,payment_ref,receipt_url,next_due_date,next_due_km,admin_note,resolved_at,resolved_by)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      v.id, null, 'office', b.category, URGENCY.includes(b.urgency) ? b.urgency : 'normal', txt(b.description), p.odometer_km ?? null, fileUrl(req, 'photo'), status,
-      p.service_date ?? today(), p.vendor ?? null, p.work_done ?? null, p.cost ?? null, p.paid_by ?? (p.cost > 0 ? 'company' : null), p.payment_method ?? null, p.payment_ref ?? null,
-      fileUrl(req, 'receipt'), p.next_due_date ?? null, p.next_due_km ?? null, p.admin_note ?? null,
-      status === 'resolved' ? new Date().toISOString() : null, status === 'resolved' ? req.user.name : null);
-    if (io) io.to('staff').emit('fleet:report', { id: Number(info.lastInsertRowid), vehicle_id: v.id });
-    res.json({ ok: true, report: getReport(Number(info.lastInsertRowid)) });
+    const saved = await prisma.vehicleReport.create({
+      data: {
+        vehicle_id: v.id, driver_id: null, source: 'office', category: b.category, urgency: URGENCY.includes(b.urgency) ? b.urgency : 'normal',
+        description: txt(b.description), odometer_km: p.odometer_km ?? null, photo_url: fileUrl(req, 'photo'), status,
+        service_date: p.service_date ?? today(), vendor: p.vendor ?? null, work_done: p.work_done ?? null, cost: p.cost ?? null,
+        paid_by: p.paid_by ?? (p.cost > 0 ? 'company' : null), payment_method: p.payment_method ?? null, payment_ref: p.payment_ref ?? null,
+        receipt_url: fileUrl(req, 'receipt'), next_due_date: p.next_due_date ?? null, next_due_km: p.next_due_km ?? null, admin_note: p.admin_note ?? null,
+        resolved_at: status === 'resolved' ? new Date().toISOString() : null, resolved_by: status === 'resolved' ? String(req.user.name) : null,
+      },
+    });
+    if (io) io.to('staff').emit('fleet:report', { id: saved.id, vehicle_id: v.id });
+    res.json({ ok: true, report: await getReport(saved.id) });
   });
 
   // moderate a report: status, cost, workshop, payment details, next-due reminder
-  r.put('/fleet/maintenance/:id', auth('admin'), (req, res) => {
-    const cur = q.get(`SELECT * FROM vehicle_reports WHERE id=?`, req.params.id);
+  r.put('/fleet/maintenance/:id', auth('admin'), async (req, res) => {
+    const cur = await findById('vehicleReport', req.params.id);
     if (!cur) return res.status(404).json({ error: 'Report not found' });
     const b = req.body || {};
     if (b.status !== undefined && !STATUSES.includes(b.status)) return res.status(400).json({ error: 'Invalid status' });
@@ -311,12 +305,14 @@ function mountFleetMaintenanceRoutes(r, io) {
     if (next.status !== 'resolved') { next.resolved_at = null; next.resolved_by = null; }
     if (next.cost > 0 && !next.paid_by) next.paid_by = 'company';
 
-    q.run(`UPDATE vehicle_reports SET status=?, urgency=?, service_date=?, vendor=?, work_done=?, cost=?, paid_by=?, payment_method=?, payment_ref=?, reimbursed=?,
-      next_due_date=?, next_due_km=?, admin_note=?, odometer_km=?, resolved_at=?, resolved_by=?, updated_at=datetime('now') WHERE id=?`,
-      next.status, next.urgency, next.service_date, next.vendor, next.work_done, next.cost, next.paid_by, next.payment_method, next.payment_ref, next.reimbursed,
-      next.next_due_date, next.next_due_km, next.admin_note, next.odometer_km, next.resolved_at, next.resolved_by, cur.id);
+    const fields = ['status', 'urgency', 'service_date', 'vendor', 'work_done', 'cost', 'paid_by', 'payment_method', 'payment_ref', 'reimbursed',
+      'next_due_date', 'next_due_km', 'admin_note', 'odometer_km', 'resolved_at', 'resolved_by'];
+    const data = Object.fromEntries(fields.map((k) => [k, next[k] ?? null]));
+    data.status = next.status; data.urgency = next.urgency; data.reimbursed = next.reimbursed ? 1 : 0;   // required fields
+    if (data.resolved_by != null) data.resolved_by = String(data.resolved_by);
+    await prisma.vehicleReport.update({ where: { id: cur.id }, data: { ...data, updated_at: sqlNow() } });
 
-    const rep = getReport(cur.id);
+    const rep = await getReport(cur.id);
     if (next.status !== cur.status) {
       const word = { approved: 'approved', in_progress: 'being worked on', resolved: 'resolved', rejected: 'not approved', open: 're-opened' }[next.status];
       notifyDriver(io, cur.driver_id, `Vehicle report ${word}`, `${rep.fleet_number} · ${rep.category_label}${next.admin_note ? ' — ' + next.admin_note : ''}`);
@@ -328,31 +324,32 @@ function mountFleetMaintenanceRoutes(r, io) {
   });
 
   // attach / replace the payment proof (receipt photo) or the issue photo
-  r.post('/fleet/maintenance/:id/proof', auth('admin'), files, (req, res) => {
-    const cur = q.get(`SELECT * FROM vehicle_reports WHERE id=?`, req.params.id);
+  r.post('/fleet/maintenance/:id/proof', auth('admin'), files, async (req, res) => {
+    const cur = await findById('vehicleReport', req.params.id);
     if (!cur) { dropFiles(req); return res.status(404).json({ error: 'Report not found' }); }
     const receipt = fileUrl(req, 'receipt'), photo = fileUrl(req, 'photo');
     if (!receipt && !photo) return res.status(400).json({ error: 'Attach a photo of the receipt (JPEG, PNG, WebP or HEIC)' });
-    q.run(`UPDATE vehicle_reports SET receipt_url=COALESCE(?,receipt_url), photo_url=COALESCE(?,photo_url), updated_at=datetime('now') WHERE id=?`, receipt, photo, cur.id);
-    res.json({ ok: true, report: getReport(cur.id) });
+    // SQL COALESCE(?, receipt_url): only overwrite what was uploaded
+    await prisma.vehicleReport.update({ where: { id: cur.id }, data: { receipt_url: receipt ?? cur.receipt_url, photo_url: photo ?? cur.photo_url, updated_at: sqlNow() } });
+    res.json({ ok: true, report: await getReport(cur.id) });
   });
 
   // ── CAPACITY MODERATION ──────────────────────────────────────
   // vehicle default (replaces the fixed 15)
-  r.put('/fleet/capacity/default', auth('admin'), ownerOnly, (req, res) => {
-    const v = q.get(`SELECT * FROM vehicles WHERE id=?`, (req.body || {}).vehicle_id);
+  r.put('/fleet/capacity/default', auth('admin'), ownerOnly, async (req, res) => {
+    const v = await findById('vehicle', (req.body || {}).vehicle_id);
     if (!v) return res.status(404).json({ error: 'Vehicle not found' });
     const cap = Number((req.body || {}).capacity);
     if (!capacity.validCapacity(cap) || cap < 1) return res.status(400).json({ error: `Default capacity must be a whole number from 1 to ${capacity.MAX_CAPACITY}` });
-    q.run(`UPDATE vehicles SET max_daily_capacity=? WHERE id=?`, cap, v.id);
+    await prisma.vehicle.update({ where: { id: v.id }, data: { max_daily_capacity: cap } });
     if (io) io.to('staff').emit('ledger:refresh', {});
     res.json({ ok: true, vehicle_id: v.id, capacity: cap, previous: v.max_daily_capacity });
   });
 
   // one-day override (workshop day → 0, extra helper → more)
-  r.put('/fleet/capacity/override', auth('admin'), (req, res) => {
+  r.put('/fleet/capacity/override', auth('admin'), async (req, res) => {
     const b = req.body || {};
-    const v = q.get(`SELECT * FROM vehicles WHERE id=?`, b.vehicle_id);
+    const v = await findById('vehicle', b.vehicle_id);
     if (!v) return res.status(404).json({ error: 'Vehicle not found' });
     const dErr = security.dateInRange(b.date, { pastDays: 0, futureDays: 366 });
     if (dErr) return res.status(400).json({ error: dErr });
@@ -360,16 +357,17 @@ function mountFleetMaintenanceRoutes(r, io) {
     if (!capacity.validCapacity(cap)) return res.status(400).json({ error: `Capacity must be a whole number from ${capacity.MIN_CAPACITY} to ${capacity.MAX_CAPACITY}` });
     const reason = txt(b.reason, 200);
     if (cap !== v.max_daily_capacity && !reason) return res.status(400).json({ error: 'Add a short reason (e.g. "oil change at workshop")' });
-    capacity.setOverride(v.id, b.date, cap, reason, req.user.name);
-    const load = capacity.loadOf(v.id, b.date);
+    await capacity.setOverride(v.id, b.date, cap, reason, req.user.name);
+    const load = await capacity.loadOf(v.id, b.date);
     const overBy = Math.max(0, load - cap);
-    if (overBy > 0) alertCrm(io, 'CAPACITY', 'warning', `${v.fleet_number} on ${dmy(b.date)}: capacity set to ${cap} but ${load} stops are scheduled — reschedule ${overBy} stop(s).`);
+    if (overBy > 0) await alertCrm(io, 'CAPACITY', 'warning', `${v.fleet_number} on ${dmy(b.date)}: capacity set to ${cap} but ${load} stops are scheduled — reschedule ${overBy} stop(s).`);
     if (io) io.to('staff').emit('ledger:refresh', { date: b.date });
     res.json({ ok: true, vehicle_id: v.id, date: b.date, capacity: cap, load, over_by: overBy });
   });
-  r.delete('/fleet/capacity/override', auth('admin'), (req, res) => {
+  r.delete('/fleet/capacity/override', auth('admin'), async (req, res) => {
     const b = { ...(req.query || {}), ...(req.body || {}) };
-    const n = capacity.clearOverride(Number(b.vehicle_id), String(b.date || ''));
+    const vid = Number(b.vehicle_id);
+    const n = Number.isInteger(vid) ? await capacity.clearOverride(vid, String(b.date || '')) : 0;
     if (io) io.to('staff').emit('ledger:refresh', { date: b.date });
     res.json({ ok: true, removed: n });
   });

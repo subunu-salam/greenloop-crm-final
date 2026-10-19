@@ -1,15 +1,25 @@
 # GreenLoop — Automated Waste Logistics & Fleet Management System
 
+> **v4.0 — MongoDB + Prisma.** The database moved from SQLite to MongoDB, accessed through
+> Prisma ORM (`prisma/schema.prisma`, `server/prisma.js`). See "v4" at the end of this file.
+
 Complete working product per the PRD: a **Driver PWA** (zero-text, visual-first) and an **Owner CRM Control Center**, connected in real time over WebSockets, backed by a Node.js API with an intelligent scheduling and rescheduling engine.
 
-## Quick start (2 minutes)
+## Quick start
 
-Requires **Node.js 22+** (nothing else — the database is built in).
+Requires **Node.js 22+** and **MongoDB** running as a replica set (Prisma needs one).
+Step-by-step for MongoDB Community Server + Compass: **[docs/MONGODB-SETUP.md](docs/MONGODB-SETUP.md)**.
 
 ```bash
-npm install
+cp .env.example .env        # then check DATABASE_URL in .env
+npm install                 # also runs "prisma generate"
+npm run db:setup            # creates the collections' indexes in MongoDB
+npm run db:check            # optional: "is my database working?"
 npm start
 ```
+
+New to MongoDB or Prisma? Read **[docs/MONGODB-PRISMA-GUIDE.md](docs/MONGODB-PRISMA-GUIDE.md)** —
+how this project stores its data, with SQL → Prisma examples taken from this code.
 
 | App | URL | Login |
 |---|---|---|
@@ -79,12 +89,12 @@ Three add-ons in `server/growth.js`, with screens in `public/*/growth.js`. Exist
 Tests: `node test/unit/growth.test.js` (also part of `npm test`).
 
 ## Configuration
-- `PORT` (default 3000), `JWT_SECRET` (set in production!), `DB_PATH` (SQLite file location)
+- `DATABASE_URL` (MongoDB connection string, in `.env`), `PORT` (default 3000), `JWT_SECRET` (set in production!)
 - Shift cutoff: `PUT /api/v1/settings { "shift_cutoff": "12:00" }` (also drives the SLA monitor)
 
 ## Production notes
-- `deploy/schema.postgres.sql` — identical schema for PostgreSQL; the query layer in `server/db.js` is isolated so swapping the driver (e.g. `pg`) is a contained change.
-- `deploy/docker-compose.yml` — app + Postgres containers.
+- `prisma/schema.prisma` — every collection, field and index. `npm run db:setup` applies it to MongoDB.
+- `deploy/docker-compose.yml` — app + MongoDB (replica set) containers. For a hosted database use MongoDB Atlas (see DEPLOY.md).
 - Photo uploads land in `uploads/`; in production point this at S3/object storage.
 - HTTPS is required in production for camera + geolocation APIs on phones.
 
@@ -100,7 +110,7 @@ Tests: `node test/unit/growth.test.js` (also part of `npm test`).
 
 ## v3 — PRD v1.0 implementation
 
-New server module: `server/v3.js` (schema migrations run automatically on start, SQLite only).
+New server module: `server/v3.js` (its collections are defined in `prisma/schema.prisma`).
 
 **CRM** (glassmorphism theme, role-aware navigation): sales pipeline & lead kanban, quotation builder (5% VAT, versioning, WhatsApp share via `wa.me`, public accept link `/q/:token`, printable PDF), convert quote → customer (multi-site, plans, portal code), service catalogue, recurring service plans (daily / weekly / monthly nth-weekday, time windows, pause/resume), ad-hoc orders, booking requests, not-picked-up confirmations & disputes, invoices & payments with balances, customer 360 view with risk score, "clients needing attention", ops-staff role (blocked from billing/settings), audit log.
 
@@ -120,7 +130,6 @@ New server module: `server/v3.js` (schema migrations run automatically on start,
 ### Notes / open items
 - "PDFs" (quotes, invoices, history) are print-ready HTML pages — use the browser's Save as PDF.
 - The UAE holiday list for 2026 is approximate; edit it in CRM → Settings.
-- The Postgres mode (`db-pg.js`) does not support the v3 module.
 - Open PRD questions: SMS/email provider for OTP, payment gateway, final holiday calendar, VAT registration number on documents.
 
 ---
@@ -156,7 +165,7 @@ Result of a full QA pass (regression, edge-case, load and A/B performance testin
 - New database indexes (customers list 7 → 160 req/s on 500 customers / 26k jobs),
   prepared-statement cache, index-friendly month filters.
 - Nightly plan generation runs in batches (300 plans: 4.4 s freeze → 0.6 s, longest pause 0.1 s).
-- Daily SQLite backup (`VACUUM INTO`) next to the database, last 14 days kept.
+- Daily backup, last 14 days kept (v4: a JSON export of every collection in `BACKUP_DIR`; use `mongodump` or Atlas backups for production).
 - Quote and invoice numbers can no longer repeat (database-enforced for invoices).
 
 ### New / changed settings
@@ -260,3 +269,34 @@ Camera, GPS and notifications only work over HTTPS (or `localhost`). Test the dr
 
 ### Not changed in this build
 `mobile-expo/` (native driver app) and `crm-react/` still use the older screens. There is no SMS provider: one-time codes go by email only.
+
+
+---
+
+## v4 — MongoDB + Prisma
+
+The whole server now stores its data in **MongoDB** through **Prisma ORM** (SQLite and the unused Postgres layer are gone).
+The API, the CRM, the driver app, the customer app and the Expo app are unchanged: every response has the same fields as before.
+
+| What | Where |
+|---|---|
+| Collections, fields, indexes | `prisma/schema.prisma` (31 collections + `counters`) |
+| The database connection (one Prisma client, auto ids, timestamps) | `server/prisma.js` |
+| Helpers every module uses (`join`, `findById`, `sortBy`, seed data) | `server/db.js` |
+| Partial unique rules Prisma can't express | `server/mongo-indexes.js` → `npm run db:indexes` |
+| Move an existing SQLite database into MongoDB | `npm run db:migrate-sqlite -- path/to/greenloop.sqlite` |
+| Learn how it all works | `docs/MONGODB-PRISMA-GUIDE.md`, setup in `docs/MONGODB-SETUP.md` |
+
+Design decisions (details in the guide): numeric ids are kept (a `counters` collection hands out the next number),
+field names stay snake_case, dates stay `YYYY-MM-DD` text, yes/no flags stay 0/1 — so nothing in the front-ends changed.
+
+### Commands
+| Command | What it does |
+|---|---|
+| `npm run db:setup` | `prisma db push` (collections + indexes) and the partial unique indexes |
+| `npm run db:check` | Connects, checks the replica set, counts documents per collection |
+| `npm run db:studio` | Opens Prisma Studio, a browser view of the data (Compass works too) |
+| `npm run db:migrate-sqlite` | One-time copy of an old SQLite database (ids kept) |
+| `npm test` | All unit suites against an in-memory stand-in for Prisma (no database needed, CI) |
+| `npm run test:mongo` | The same suites against your real MongoDB (database `greenloop_test`, emptied each run) |
+| `npm run test:e2e` | Boots the real server against MongoDB (database `greenloop_e2e`) |

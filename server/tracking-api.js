@@ -1,5 +1,5 @@
 const tracking = require('./tracking');
-const { q } = require('./db');
+const { prisma, join } = require('./db');
 const jwt = require('jsonwebtoken');
 const { checkGeofenceForDriver } = require('./ops-features');
 require('./security').ensureSecret();
@@ -32,7 +32,7 @@ function auth(role) {
 }
 
 function mountTrackingRoutes(r, io) {
-  r.post('/driver/location', auth('driver'), (req, res) => {
+  r.post('/driver/location', auth('driver'), async (req, res) => {
     const { lat, lng, speed, heading, force } = req.body || {};
     if (lat == null || lng == null || !Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng))) {
       return res.status(400).json({ error: 'lat and lng required' });
@@ -40,7 +40,7 @@ function mountTrackingRoutes(r, io) {
     let fleet_number = null;
     let vehicle_id = req.user.vehicle_id || null;
     if (vehicle_id) {
-      const v = q.get(`SELECT fleet_number FROM vehicles WHERE id=?`, vehicle_id);
+      const v = Number.isInteger(vehicle_id) ? await prisma.vehicle.findUnique({ where: { id: vehicle_id }, select: { fleet_number: true } }) : null;
       fleet_number = v?.fleet_number || null;
     }
     const { skipped, position } = tracking.setPosition(req.user.id, {
@@ -60,18 +60,14 @@ function mountTrackingRoutes(r, io) {
       if (vehicle_id) io.to('vehicle:' + vehicle_id).emit('driver:location', position);
 
       try {
-        geofence = checkGeofenceForDriver(req.user.id, position.lat, position.lng, io) || [];
+        geofence = (await checkGeofenceForDriver(req.user.id, position.lat, position.lng, io)) || [];
       } catch {}
 
       try {
         const today = new Date().toISOString().slice(0, 10);
-        const stops2 = q.all(
-          `SELECT p.customer_id, c.lat, c.lng, c.name FROM pickups p
-           JOIN customers c ON c.id = p.customer_id
-           WHERE p.driver_id=? AND p.scheduled_date=? AND p.status IN ('pending','overdue')`,
-          req.user.id,
-          today
-        );
+        const stops2 = await join(
+          await prisma.pickup.findMany({ where: { driver_id: req.user.id, scheduled_date: today, status: { in: ['pending', 'overdue'] } }, select: { customer_id: true }, orderBy: { id: 'asc' } }),
+          'customer_id', 'customer', ['lat', 'lng', 'name'], { inner: true });
         const seen = new Set();
         for (const s of stops2) {
           if (seen.has(s.customer_id)) continue;
@@ -133,20 +129,17 @@ function mountTrackingRoutes(r, io) {
     } catch {
       return res.status(401).json({ error: 'Invalid token' });
     }
-  }, (req, res) => {
+  }, async (req, res) => {
     const cid = req.user.customer_id || req.user.id;
     const today = new Date().toISOString().slice(0, 10);
-    const pickup = q.get(
-      `SELECT p.*, c.lat AS cust_lat, c.lng AS cust_lng, v.fleet_number, u.full_name AS driver_name
-       FROM pickups p
-       JOIN customers c ON c.id = p.customer_id
-       LEFT JOIN vehicles v ON v.id = p.vehicle_id
-       LEFT JOIN users u ON u.id = p.driver_id
-       WHERE p.customer_id=? AND p.scheduled_date=? AND p.status IN ('pending','overdue')
-       ORDER BY p.seq LIMIT 1`,
-      cid,
-      today
-    );
+    let rows = await prisma.pickup.findMany({
+      where: { customer_id: cid, scheduled_date: today, status: { in: ['pending', 'overdue'] } },
+      orderBy: [{ seq: 'asc' }, { id: 'asc' }], take: 1,
+    });
+    rows = await join(rows, 'customer_id', 'customer', { cust_lat: 'lat', cust_lng: 'lng' }, { inner: true });
+    rows = await join(rows, 'vehicle_id', 'vehicle', ['fleet_number']);
+    rows = await join(rows, 'driver_id', 'user', { driver_name: 'full_name' });
+    const pickup = rows[0];
     if (!pickup || !pickup.driver_id) {
       return res.json({ tracking: false, reason: 'No active pickup today' });
     }

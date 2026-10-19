@@ -6,15 +6,21 @@
 |-------|--------|
 | **Frontend** | Cloudflare Pages (`crm-react/`) |
 | **Backend** | Render (recommended) or Vercel |
-| **Database** | Neon PostgreSQL |
+| **Database** | MongoDB Atlas (free M0 cluster to start) |
 
 ---
 
-## Step 1 — Neon
+## Step 1 — MongoDB Atlas
 
-1. Create a project at https://neon.tech  
-2. Copy the connection string (`postgresql://user:pass@ep-xxx.neon.tech/neondb?sslmode=require`)  
-3. Optional: run SQL from `deploy/schema.postgres.sql` and `server/migrations/002_companies_maintenance.pg.sql` in the Neon SQL editor  
+1. Create a free cluster at https://cloud.mongodb.com (region close to the UAE, e.g. Bahrain or Mumbai)
+2. **Database Access** → add a database user with a strong password
+3. **Network Access** → allow Render's outbound IPs (or `0.0.0.0/0` while testing)
+4. **Connect → Drivers** → copy the string and add the database name `greenloop`:
+   `mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/greenloop?retryWrites=true&w=majority`
+5. Atlas is already a replica set, which Prisma needs. Nothing else to configure.
+
+Existing data from the SQLite version? Run once on your computer with `DATABASE_URL` pointing at Atlas:
+`npm run db:setup` then `npm run db:migrate-sqlite -- path/to/greenloop.sqlite`
 
 ---
 
@@ -23,16 +29,16 @@
 1. https://render.com → **New** → **Web Service** (or Blueprint with `render.yaml`)  
 2. Connect GitHub repo **subunu-salam/greenloop**  
 3. Settings:
-   - Build: `npm install`
+   - Build: `npm install && npm run db:setup`
    - Start: `node server/index.js`
    - Node 22
 4. Environment variables:
-   - `DATABASE_URL` = Neon connection string
+   - `DATABASE_URL` = Atlas connection string
    - `JWT_SECRET` = long random string
    - `CORS_ORIGIN` = your Cloudflare URL, e.g. `https://greenloop-crm.pages.dev`
 5. Deploy → copy the URL, e.g. `https://greenloop-api.onrender.com`
 
-> **Note:** Local SQLite path is fully working today. Neon schema + driver are ready; some API routes still use the sync SQLite helper. After first deploy with Neon, if any route errors, we finish the async migration of `server/api.js` next.
+> Photos and receipts are still files: keep the Render disk (`UPLOAD_DIR=/var/data/uploads`) or move them to object storage.
 
 ---
 
@@ -55,14 +61,10 @@ Open the Pages URL → **admin / admin123**
 ## Local
 
 ```bash
-npm start                    # backend SQLite
+cp .env.example .env         # DATABASE_URL → your local MongoDB (docs/MONGODB-SETUP.md)
+npm install && npm run db:setup
+npm start                    # backend http://localhost:3000
 cd crm-react && npm run dev  # frontend http://localhost:5173
-```
-
-With Neon locally:
-```bash
-export DATABASE_URL="postgresql://...@ep-xxx.neon.tech/neondb?sslmode=require"
-npm start
 ```
 
 ---

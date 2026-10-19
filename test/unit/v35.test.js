@@ -1,6 +1,6 @@
 // v3.5 — AI insights and performance reports (server/insights.js, GET /ai/*)
 const { call, tok } = require('./harness');
-const { q } = require('../../server/db');
+const { prisma } = require('../../server/db');
 const ins = require('../../server/insights');
 const { fitForecast, localMinutes, windowEnd } = ins._internal;
 
@@ -12,16 +12,17 @@ const dubaiToday = () => new Date(Date.now() + 4 * 3600e3).toISOString().slice(0
 const addDays = (d, n) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
 
 (async () => {
+  await require('./harness').ready;
   // ── time handling ──
   rec('Time', 'Arrival times are read in Dubai time (08:15 UTC is 12:15)', localMinutes('2026-10-05T08:15:00.000Z') === 735 && localMinutes('2026-10-05 08:15:00') === 735, String(localMinutes('2026-10-05T08:15:00.000Z')));
   rec('Time', 'The window end comes from the stop\'s time window', windowEnd('07:00-12:00') === 720 && windowEnd('12:00-16:30') === 990 && windowEnd(null, 600) === 600);
 
   // ── demo data on an empty history ──
-  const before = q.get(`SELECT COUNT(*) c FROM pickups`).c;
+  const before = await prisma.pickup.count();
   let r = await call('GET', '/ai/insights', { token: A });
   const o = r.body;
   rec('Data', 'With little history the page uses demo data and says so', r.status === 200 && o.source === 'demo' && /demo data/i.test(o.note || ''), o.note);
-  rec('Data', 'Demo data is never written to the database', q.get(`SELECT COUNT(*) c FROM pickups`).c === before, `${before} jobs before and after`);
+  rec('Data', 'Demo data is never written to the database', await prisma.pickup.count() === before, `${before} jobs before and after`);
   rec('Data', 'Asking for demo data explicitly works', (await call('GET', '/ai/insights?source=demo', { token: A })).body.source === 'demo');
 
   // ── forecast and confidence ──
@@ -67,19 +68,19 @@ const addDays = (d, n) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x
 
   // ── live data ──
   // 8 weeks of finished jobs for the seeded customers; driver 1 is late on every 4th stop
-  const cust = q.all(`SELECT id FROM customers WHERE is_active=1 ORDER BY id LIMIT 6`), drivers = q.all(`SELECT id, vehicle_id FROM users WHERE role='driver' ORDER BY id LIMIT 2`);
+  const cust = await prisma.customer.findMany({ where: { is_active: 1 }, select: { id: true }, orderBy: { id: 'asc' }, take: 6 }), drivers = await prisma.user.findMany({ where: { role: 'driver' }, select: { id: true, vehicle_id: true }, orderBy: { id: 'asc' }, take: 2 });
   let late = 0, done = 0, n = 0;
-  q.run('BEGIN');
+  const rows = [];
   for (let back = 56; back >= 1; back--) {
     const day = addDays(dubaiToday(), -back);
     for (let i = 0; i < 6; i++) {
       const dv = drivers[i % 2], isLate = dv === drivers[0] && n % 4 === 0; n++;
       const arrive = new Date(`${day}T${isLate ? '08:40' : '07:10'}:00Z`).toISOString();     // 12:40 or 11:10 in Dubai, window ends 12:00
-      q.run(`INSERT INTO pickups(customer_id,vehicle_id,driver_id,scheduled_date,status,completed_at,arrived_at,time_window) VALUES (?,?,?,?,?,?,?,?)`, cust[i].id, dv.vehicle_id, dv.id, day, 'collected', arrive, arrive, '07:00-12:00');
+      rows.push({ customer_id: cust[i].id, vehicle_id: dv.vehicle_id, driver_id: dv.id, scheduled_date: day, status: 'collected', completed_at: arrive, arrived_at: arrive, time_window: '07:00-12:00' });
       if (back <= 28) { done++; if (isLate) late++; }
     }
   }
-  q.run('COMMIT');
+  await prisma.pickup.createMany({ data: rows });   // one bulk insert instead of BEGIN … COMMIT
   const live = (await call('GET', '/ai/insights', { token: A })).body;
   const expect = Math.round((1000 * (done - late)) / done) / 10;
   rec('Data', 'With enough history the page switches to your own data', live.source === 'live' && !live.note, `${done} finished jobs in 28 days`);

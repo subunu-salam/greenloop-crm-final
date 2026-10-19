@@ -1,14 +1,15 @@
 // v3.4.2 — phone rules per country, readable email errors, no false Overdue for stops added after the cutoff
-const { call, db } = require('./harness');
+const { call, ready } = require('./harness');
 const contacts = require('../../server/contacts');
 const mailer = require('../../server/mailer');
 const sla = require('../../server/services/sla');
-const { q, getSetting, setSetting } = require('../../server/db');
+const { prisma, getSetting, setSetting } = require('../../server/db');
 
 const results = [];
 const rec = (area, name, ok, note = '') => { results.push({ area, name, ok: !!ok, note }); console.log(`${ok ? 'PASS' : 'FAIL'}  [${area}] ${name}${note ? ' → ' + note : ''}`); };
 
 (async () => {
+  await ready;
   // ── phone numbers ──
   const good = [
     ['+971501234567', 'mobile', '+971 50 123 4567'], ['0561234567', 'mobile', '+971 56 123 4567'], ['+97141234567', 'landline', '+971 4 123 4567'], ['+97167564326', 'landline', '+971 6 756 4326'],
@@ -41,25 +42,27 @@ const rec = (area, name, ok, note = '') => { results.push({ area, name, ok: !!ok
   // ── overdue check ──
   const today = new Date().toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() - 864e5).toISOString().slice(0, 10);
-  const cid = q.get(`SELECT id FROM customers LIMIT 1`).id, vid = q.get(`SELECT id FROM vehicles LIMIT 1`).id;
-  const old = getSetting('shift_cutoff', '12:00');
-  setSetting('shift_cutoff', '00:01');
+  const cid = (await prisma.customer.findFirst({ orderBy: { id: 'asc' } })).id, vid = (await prisma.vehicle.findFirst({ orderBy: { id: 'asc' } })).id;
+  const old = await getSetting('shift_cutoff', '12:00');
+  await setSetting('shift_cutoff', '00:01');
   const sql = d => new Date(d).toISOString().slice(0, 19).replace('T', ' ');
-  const add = (date, created) => Number(q.run(`INSERT INTO pickups(customer_id,vehicle_id,scheduled_date,status,created_at) VALUES (?,?,?,'pending',?)`, cid, vid, date, sql(created)).lastInsertRowid);
-  const before = add(today, new Date(`${today}T00:00:00`).getTime() - 3600e3);   // planned before today's cutoff
-  const after = add(today, Date.now());                                           // added just now, after the cutoff
-  const lateYesterday = add(yesterday, new Date(`${yesterday}T15:00:00`).getTime());
-  const oldPlanned = add(yesterday, new Date(`${yesterday}T00:00:00`).getTime() - 5 * 864e5);  // planned days ahead, untouched history
-  const out = sla.checkNow(null);
-  const st = id => q.get(`SELECT status FROM pickups WHERE id=?`, id).status;
+  const add = async (date, created) => (await prisma.pickup.create({ data: { customer_id: cid, vehicle_id: vid, scheduled_date: date, status: 'pending', created_at: sql(created) } })).id;
+  const before = await add(today, new Date(`${today}T00:00:00`).getTime() - 3600e3);   // planned before today's cutoff
+  const after = await add(today, Date.now());                                           // added just now, after the cutoff
+  const lateYesterday = await add(yesterday, new Date(`${yesterday}T15:00:00`).getTime());
+  const oldPlanned = await add(yesterday, new Date(`${yesterday}T00:00:00`).getTime() - 5 * 864e5);  // planned days ahead, untouched history
+  const out = await sla.checkNow(null);
+  const statuses = new Map((await prisma.pickup.findMany({ where: { id: { in: [before, after, lateYesterday, oldPlanned] } } })).map(p => [p.id, p.status]));
+  const st = id => statuses.get(id);
   rec('Overdue', 'A stop planned before the cutoff still turns Overdue', st(before) === 'overdue', st(before));
-  rec('Overdue', 'A stop added after the cutoff stays pending and raises no alert', st(after) === 'pending' && !q.get(`SELECT id FROM alerts WHERE pickup_id=?`, after), `${st(after)}; counted as added after cutoff: ${out.added_after_cutoff}`);
+  rec('Overdue', 'A stop added after the cutoff stays pending and raises no alert', st(after) === 'pending' && !(await prisma.alert.findFirst({ where: { pickup_id: after } })), `${st(after)}; counted as added after cutoff: ${out.added_after_cutoff}`);
   rec('Overdue', 'That late-added stop turns Overdue the next day if nobody did it', st(lateYesterday) === 'overdue', st(lateYesterday));
   rec('Overdue', 'Older pending stops from past days are left exactly as they were', st(oldPlanned) === 'pending', st(oldPlanned));
-  const again = sla.checkNow(null);
+  const again = await sla.checkNow(null);
   rec('Overdue', 'Running the check again raises nothing new', again.breaches === 0, `${again.breaches} new`);
-  setSetting('shift_cutoff', old);
-  q.run(`DELETE FROM alerts WHERE pickup_id IN (?,?,?,?)`, before, after, lateYesterday, oldPlanned); q.run(`DELETE FROM pickups WHERE id IN (?,?,?,?)`, before, after, lateYesterday, oldPlanned);
+  await setSetting('shift_cutoff', old);
+  const ids = [before, after, lateYesterday, oldPlanned];
+  await prisma.alert.deleteMany({ where: { pickup_id: { in: ids } } }); await prisma.pickup.deleteMany({ where: { id: { in: ids } } });
 
   const f = results.filter(x => !x.ok).length;
   console.log(`\nSUMMARY: ${results.length - f} passed, ${f} failed`);

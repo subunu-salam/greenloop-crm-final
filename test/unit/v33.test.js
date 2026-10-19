@@ -1,6 +1,9 @@
 // v3.3 — one phone format + no duplicates, frequency-based pricing, preview before send,
 // driver shift clock + arrival proof, 4-digit app codes, one-time codes by Gmail.
-const { call, tok, db, v3 } = require('./harness'); const { q } = db;
+const { call, tok, prisma, v3, ready } = require('./harness');
+// small helpers for reading the in-memory database in assertions
+const one = (model, where, select) => prisma[model].findFirst({ where, ...(select ? { select } : {}), orderBy: { id: 'asc' } });
+const count = (model, where) => prisma[model].count({ where });
 const contacts = require('../../server/contacts');
 const mailer = require('../../server/mailer');
 const A = tok({ id: 1, role: 'admin', crm_role: 'owner', name: 'Owner' });
@@ -9,6 +12,7 @@ const today = new Date().toISOString().slice(0, 10);
 const site = { name: 'HQ', zone: 'Deira', lat: 25.27, lng: 55.31 };
 const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', company: 'Co', service_type: 'WASTE', source: 'website', sites: [site], ...o } });
 (async () => {
+  await ready;
   let r;
   // ───────── PHONE FORMAT ─────────
   const P = (x) => contacts.parsePhone(x);
@@ -22,7 +26,7 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   // ───────── LEADS: validation + duplicates ─────────
   r = await lead({ phone: '050 777 0001', email: 'First@Dup.ae' });
   const L1 = r.body.id;
-  rec('Lead', 'A lead is saved with the number in one format', r.status === 200 && q.get(`SELECT phone, email FROM leads WHERE id=?`, L1).phone === '+971507770001' && q.get(`SELECT email FROM leads WHERE id=?`, L1).email === 'first@dup.ae', '+971507770001');
+  rec('Lead', 'A lead is saved with the number in one format', r.status === 200 && (await one('lead', { id: L1 })).phone === '+971507770001' && (await one('lead', { id: L1 })).email === 'first@dup.ae', '+971507770001');
   r = await lead({ phone: '+971 50 777 0001' });
   rec('Lead', 'The same mobile number cannot be added as a second lead', r.status === 409 && r.body.code === 'DUPLICATE' && r.body.duplicate.type === 'lead' && r.body.duplicate.id === L1, r.body.error);
   r = await lead({ phone: '+971507770002', email: 'FIRST@dup.ae' });
@@ -40,7 +44,7 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   rec('Lead', 'A lead cannot be changed to a number another lead has', r.status === 409, r.body.error);
   r = await call('PUT', '/leads/' + L2, { token: A, body: { stage: 'contacted' } });
   rec('Lead', 'Moving a lead between stages still works', r.status === 200, r.status);
-  const cust0 = q.get(`SELECT id, name, branch, contact_phone FROM customers WHERE contact_phone LIKE '+9715%' ORDER BY id LIMIT 1`);
+  const cust0 = await one('customer', { contact_phone: { startsWith: '+9715' } }, { id: true, name: true, branch: true, contact_phone: true });
   r = await lead({ phone: cust0.contact_phone });
   rec('Lead', 'A number that already belongs to a customer cannot become a new lead', r.status === 409 && r.body.duplicate.type === 'customer', r.body.error);
   r = await call('GET', `/contacts/check?phone=${encodeURIComponent('050 777 0001')}`, { token: A });
@@ -50,12 +54,12 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   const cbody = (o) => ({ name: 'New Mart', branch: 'One', zone: 'Deira', frequency: 2, lat: 25.27, lng: 55.31, ...o });
   r = await call('POST', '/customers', { token: A, body: cbody({ contact_phone: '+971 50 888 0001', email: 'Shop@NewMart.ae' }) });
   const C1 = r.body.id;
-  rec('Customer', 'A customer is saved with normalised mobile and email', r.status === 200 && q.get(`SELECT contact_phone p, email e FROM customers WHERE id=?`, C1).p === '+971508880001' && q.get(`SELECT email e FROM customers WHERE id=?`, C1).e === 'shop@newmart.ae', '+971508880001');
+  rec('Customer', 'A customer is saved with normalised mobile and email', r.status === 200 && (await one('customer', { id: C1 })).contact_phone === '+971508880001' && (await one('customer', { id: C1 })).email === 'shop@newmart.ae', '+971508880001');
   r = await call('POST', '/customers', { token: A, body: cbody({ name: 'Other Shop', contact_phone: '0508880001' }) });
   rec('Customer', 'The same number on a different customer is refused, with an offer to add a site', r.status === 409 && r.body.can_link === true && r.body.duplicate.id === C1, r.body.error);
   r = await call('POST', '/customers', { token: A, body: cbody({ branch: 'Two', contact_phone: '0508880001', link_account_id: C1 }) });
   const C2 = r.body.id;
-  rec('Customer', 'Adding it as another site joins the same account', r.status === 200 && r.body.linked_account === C1 && q.get(`SELECT account_id a FROM customers WHERE id=?`, C2).a === C1 && q.get(`SELECT account_id a FROM customers WHERE id=?`, C1).a === C1, 'account ' + C1);
+  rec('Customer', 'Adding it as another site joins the same account', r.status === 200 && r.body.linked_account === C1 && (await one('customer', { id: C2 })).account_id === C1 && (await one('customer', { id: C1 })).account_id === C1, 'account ' + C1);
   r = await call('PUT', '/customers/' + C2, { token: A, body: { address: 'New address' } });
   rec('Customer', 'Sites of one account may share the number', r.status === 200, r.status);
   r = await call('PUT', '/customers/' + cust0.id, { token: A, body: { contact_phone: '+971508880001' } });
@@ -63,9 +67,9 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   r = await call('PUT', '/customers/' + C1, { token: A, body: { contact_phone: '+44 7700 900123' } });
   rec('Customer', 'An unsupported country code is refused', r.status === 400, r.body.error);
   r = await call('POST', '/customers/import', { token: A, body: { csv: 'name,branch,zone,frequency,lat,lng,contact_phone,email\nNew Mart,Three,Deira,2,25.2,55.3,0508880001,\nStranger,Main,Deira,2,25.2,55.3,+971508880001,\nBad Phone,Main,Deira,2,25.2,55.3,123,\nFresh Co,Main,Deira,2,25.2,55.3,+971 50 888 0099,Hello@Fresh.ae' } });
-  rec('Customer', 'CSV import: same business joins the account, strangers and bad numbers are reported', r.body.imported === 2 && r.body.errors.length === 2 && q.get(`SELECT account_id a FROM customers WHERE name='New Mart' AND branch='Three'`).a === C1 && q.get(`SELECT contact_phone p FROM customers WHERE name='Fresh Co'`).p === '+971508880099', `${r.body.imported} imported, ${r.body.errors.length} reported`);
+  rec('Customer', 'CSV import: same business joins the account, strangers and bad numbers are reported', r.body.imported === 2 && r.body.errors.length === 2 && (await one('customer', { name: 'New Mart', branch: 'Three' })).account_id === C1 && (await one('customer', { name: 'Fresh Co' })).contact_phone === '+971508880099', `${r.body.imported} imported, ${r.body.errors.length} reported`);
   r = await call('POST', '/users', { token: A, body: { full_name: 'Test Driver', role: 'driver', pin: '7391', phone: '050-999-0001' } });
-  rec('Phone', 'A driver\'s number is stored in the same format', r.status === 200 && q.get(`SELECT phone FROM users WHERE id=?`, r.body.id).phone === '+971509990001', '+971509990001');
+  rec('Phone', 'A driver\'s number is stored in the same format', r.status === 200 && (await one('user', { id: r.body.id })).phone === '+971509990001', '+971509990001');
   r = await call('POST', '/users', { token: A, body: { full_name: 'Bad', role: 'driver', pin: '7392', phone: '999' } });
   rec('Phone', 'A badly formed driver number is refused', r.status === 400, r.body.error);
 
@@ -98,11 +102,11 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
 
   // ───────── PREVIEW BEFORE SEND ─────────
   r = await call('POST', `/quotations/${QF}/send`, { token: A, body: { to: 'buyer@freq.ae' } });
-  rec('Preview', 'An email cannot be sent without previewing it first', r.status === 428 && r.body.code === 'PREVIEW_REQUIRED' && q.get(`SELECT status FROM quotations WHERE id=?`, QF).status === 'draft', r.body.error);
+  rec('Preview', 'An email cannot be sent without previewing it first', r.status === 428 && r.body.code === 'PREVIEW_REQUIRED' && (await one('quotation', { id: QF })).status === 'draft', r.body.error);
   r = await call('POST', `/quotations/${QF}/preview`, { token: A, body: { base_url: 'https://app.greenloop.ae' } });
   const pv = r.body;
   rec('Preview', 'The preview returns the exact email: recipient, subject and body', r.status === 200 && pv.to === 'buyer@freq.ae' && pv.subject.includes('AED 2,100.00 a month') && pv.html.includes('https://app.greenloop.ae/q/') && pv.html.includes('3 times a week') && pv.text.includes('Total a month: AED 2,100.00'), pv.subject);
-  rec('Preview', 'Previewing does not send or log anything', q.get(`SELECT status, sent_at FROM quotations WHERE id=?`, QF).status === 'draft' && !q.get(`SELECT sent_at FROM quotations WHERE id=?`, QF).sent_at, 'still draft');
+  rec('Preview', 'Previewing does not send or log anything', (await one('quotation', { id: QF })).status === 'draft' && !(await one('quotation', { id: QF })).sent_at, 'still draft');
   r = await call('POST', `/quotations/${QF}/preview`, { token: A, body: { to: 'not an email' } });
   rec('Preview', 'A bad recipient address is caught at the preview', r.status === 400, r.body.error);
   r = await call('POST', `/quotations/${QF}/send`, { token: A, body: { base_url: 'https://app.greenloop.ae', to: 'someone.else@freq.ae', preview_token: pv.preview_token } });
@@ -124,13 +128,13 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   const NC = r.body.customer_id, code = r.body.portal_code;
   rec('Sign-in', 'A new customer gets a 4-digit app code', r.status === 200 && /^\d{4}$/.test(code), code && code.replace(/\d/g, '•'));
   rec('Sign-in', 'The welcome email gives the mobile number in the standard format and the code', outbox.length === 1 && outbox[0].text.includes('+971 50 777 1001') && outbox[0].text.includes(code), 'welcome email');
-  const plans = q.all(`SELECT service_code, recurrence FROM service_plans WHERE customer_id=?`, NC).map(p => ({ code: p.service_code, rule: JSON.parse(p.recurrence) }));
+  const plans = (await prisma.servicePlan.findMany({ where: { customer_id: NC }, orderBy: { id: 'asc' } })).map(p => ({ code: p.service_code, rule: JSON.parse(p.recurrence) }));
   rec('Pricing', 'On registration each service is scheduled by its own frequency', plans.find(p => p.code === 'WASTE').rule.type === 'weekly' && plans.find(p => p.code === 'PEST_GENERAL').rule.type === 'monthly', plans.map(p => p.code + ':' + p.rule.type).join(', '));
   r = await call('POST', '/auth/customer-login', { body: { phone: '050 777 1001', code } });
   rec('Sign-in', 'The customer signs in with mobile number + 4-digit code', r.status === 200 && r.body.customer.id === NC, r.status);
   r = await call('POST', '/auth/customer-login', { body: { phone: '+971 50 777 1001', code: '12' } });
   rec('Sign-in', 'A code shorter than 4 digits is refused', r.status === 400, r.body.error);
-  q.run(`UPDATE customers SET portal_code_hash=? WHERE id=?`, 'h:654321', NC);
+  await prisma.customer.update({ where: { id: NC }, data: { portal_code_hash: 'h:654321' } });
   r = await call('POST', '/auth/customer-login', { body: { phone: '+971507771001', code: '654321' } });
   rec('Sign-in', 'A 6-digit code issued before this version still works', r.status === 200, r.status);
   r = await call('POST', `/customers/${NC}/portal-code`, { token: A });
@@ -156,10 +160,10 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   rec('OTP', 'An unknown number gets the same reply and no email', r.status === 200 && outbox.length === 0 && /If this mobile number or email is registered/.test(r.body.message), 'no email sent');
   r = await call('POST', '/auth/customer-otp/request', { body: { identifier: '12' } });
   rec('OTP', 'A badly formed number is refused', r.status === 400, r.body.error);
-  const noMail = q.get(`SELECT id, name, contact_phone FROM customers WHERE (email IS NULL OR email='') AND contact_phone LIKE '+9715%' AND portal_code_hash IS NOT NULL LIMIT 1`);
-  const before = q.get(`SELECT COUNT(*) c FROM alerts WHERE type='OTP_NOT_SENT'`).c;
+  const noMail = await one('customer', { OR: [{ email: null }, { email: '' }], contact_phone: { startsWith: '+9715' }, portal_code_hash: { not: null } }, { id: true, name: true, contact_phone: true });
+  const before = await count('alert', { type: 'OTP_NOT_SENT' });
   r = await call('POST', '/auth/customer-otp/request', { body: { identifier: noMail.contact_phone } });
-  rec('OTP', 'An account with no email raises an alert for the office instead of failing silently', outbox.length === 0 && q.get(`SELECT COUNT(*) c FROM alerts WHERE type='OTP_NOT_SENT'`).c === before + 1, noMail.name);
+  rec('OTP', 'An account with no email raises an alert for the office instead of failing silently', outbox.length === 0 && await count('alert', { type: 'OTP_NOT_SENT' }) === before + 1, noMail.name);
   r = await call('POST', '/auth/customer-otp/request', { body: { identifier: 'BUYER@freq.ae' } });
   await new Promise(x => setTimeout(x, 20));
   rec('OTP', 'Asking by email address works too', outbox.length === 1 && outbox[0].to === 'buyer@freq.ae', outbox.length + ' email');
@@ -172,12 +176,12 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   rec('OTP', 'OTP_DEV=1 shows the code on screen for local testing', /^\d{6}$/.test(r.body.dev_code || ''), 'test mode');
 
   // ───────── DRIVER: shift clock, arrival proof, finish / issue ─────────
-  const drivers = q.all(`SELECT id, full_name, vehicle_id FROM users WHERE role='driver' AND is_active=1 AND vehicle_id IS NOT NULL ORDER BY id`);
+  const drivers = await prisma.user.findMany({ where: { role: 'driver', is_active: 1, vehicle_id: { not: null } }, select: { id: true, full_name: true, vehicle_id: true }, orderBy: { id: 'asc' } });
   const d1 = drivers[0], d2 = drivers.find(d => d.vehicle_id !== d1.vehicle_id);
   const D1 = tok({ id: d1.id, role: 'driver', name: d1.full_name, vehicle_id: d1.vehicle_id });
   const D2 = tok({ id: d2.id, role: 'driver', name: d2.full_name, vehicle_id: d2.vehicle_id });
-  const sites = q.all(`SELECT id, name, lat, lng FROM customers WHERE is_active=1 ORDER BY id LIMIT 6`);
-  const job = (c, drv = d1) => Number(q.run(`INSERT INTO pickups(customer_id,vehicle_id,driver_id,scheduled_date,seq,status,service_type) VALUES (?,?,?,?,90,'pending','WASTE')`, c.id, drv.vehicle_id, drv.id, today).lastInsertRowid);
+  const sites = await prisma.customer.findMany({ where: { is_active: 1 }, select: { id: true, name: true, lat: true, lng: true }, orderBy: { id: 'asc' }, take: 6 });
+  const job = async (c, drv = d1) => (await prisma.pickup.create({ data: { customer_id: c.id, vehicle_id: drv.vehicle_id, driver_id: drv.id, scheduled_date: today, seq: 90, status: 'pending', service_type: 'WASTE' } })).id;
   const photo = (c, o = {}) => ({ lat: String(c.lat), lng: String(c.lng), device_now: new Date().toISOString(), photo_taken_at: new Date().toISOString(), stamped: '1', stamp_text: `${c.name} | GPS | GreenLoop · Arrived on site`, source: 'camera', ...o });
   const F = (n) => ({ filename: n, path: '/tmp/none-' + n, mimetype: 'image/jpeg' });
 
@@ -188,57 +192,57 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   r = await call('POST', '/driver/shift/clock-in', { token: D1, body: { lat: 25.27, lng: 55.31 } });
   rec('Shift', 'Clock in opens a shift with time and GPS', r.status === 200 && r.body.shift.open && r.body.shift.clock_in_lat === 25.27 && !r.body.already, r.body.shift.clock_in_at);
   r = await call('POST', '/driver/shift/clock-in', { token: D1, body: {} });
-  rec('Shift', 'Clocking in twice keeps the one shift', r.body.already === true && q.get(`SELECT COUNT(*) c FROM driver_shifts WHERE driver_id=?`, d1.id).c === 1, 'already on shift');
+  rec('Shift', 'Clocking in twice keeps the one shift', r.body.already === true && await count('driverShift', { driver_id: d1.id }) === 1, 'already on shift');
   r = await call('POST', '/driver/shift/clock-in', { token: A, body: {} });
   rec('Security', 'Only drivers can clock in', r.status === 403, r.status);
 
-  const j1 = job(sites[0]);
+  const j1 = await job(sites[0]);
   r = await call('POST', `/pickups/${j1}/finish`, { token: D1, body: {} });
   rec('Driver', 'A job cannot be finished before the arrival photo', r.status === 409 && r.body.code === 'NOT_ARRIVED', r.body.error);
   r = await call('POST', `/pickups/${j1}/issue`, { token: D1, body: { reason: 'CLOSED' } });
   rec('Driver', 'An issue cannot be reported before the arrival photo', r.status === 409 && r.body.code === 'NOT_ARRIVED', r.body.code);
   r = await call('POST', `/pickups/${j1}/ack`, { token: D1 });
-  rec('Driver', 'Start job starts the job timer', r.status === 200 && !!q.get(`SELECT started_at s FROM pickups WHERE id=?`, j1).s, 'started_at set');
+  rec('Driver', 'Start job starts the job timer', r.status === 200 && !!(await one('pickup', { id: j1 })).started_at, 'started_at set');
   r = await call('POST', `/pickups/${j1}/arrive-proof`, { token: D1, body: photo(sites[0]) });
   rec('Driver', 'Arrival without a photo is refused', r.status === 400, r.body.error);
-  const rejBefore = q.get(`SELECT COUNT(*) c FROM alerts WHERE type='PHOTO_REJECTED'`).c;
+  const rejBefore = await count('alert', { type: 'PHOTO_REJECTED' });
   r = await call('POST', `/pickups/${j1}/arrive-proof`, { token: D1, body: photo(sites[0], { lat: String(sites[0].lat + 0.02) }), file: F('far.jpg') });
-  rec('Driver', 'An arrival photo taken far from the site is rejected and the office is alerted', r.status === 422 && r.body.rejected && /m from site/.test(r.body.problems[0]) && q.get(`SELECT COUNT(*) c FROM alerts WHERE type='PHOTO_REJECTED'`).c === rejBefore + 1 && !q.get(`SELECT arrived_at a FROM pickups WHERE id=?`, j1).a, r.body.problems[0]);
+  rec('Driver', 'An arrival photo taken far from the site is rejected and the office is alerted', r.status === 422 && r.body.rejected && /m from site/.test(r.body.problems[0]) && await count('alert', { type: 'PHOTO_REJECTED' }) === rejBefore + 1 && !(await one('pickup', { id: j1 })).arrived_at, r.body.problems[0]);
   r = await call('POST', `/pickups/${j1}/arrive-proof`, { token: D1, body: photo(sites[0], { lat: '', lng: '' }), file: F('nogps.jpg') });
   rec('Driver', 'An arrival photo without GPS is rejected', r.status === 422 && r.body.problems.some(x => /GPS/.test(x)), r.body.problems[0]);
   r = await call('POST', `/pickups/${j1}/arrive-proof`, { token: D2, body: photo(sites[0]), file: F('other.jpg') });
   rec('Security', 'Another driver cannot record arrival on this job', r.status === 403, r.status);
   r = await call('POST', `/pickups/${j1}/arrive-proof`, { token: D1, body: photo(sites[0]), file: F('ok1.jpg') });
-  let row = q.get(`SELECT * FROM pickups WHERE id=?`, j1);
+  let row = await one('pickup', { id: j1 });
   rec('Driver', 'A GPS-stamped photo at the site records the arrival', r.status === 200 && r.body.stage === 'arrived' && row.arrival_photo_url === '/uploads/ok1.jpg' && row.arrival_distance_m === 0 && !!row.arrived_at && row.stage === 'arrived' && row.status === 'pending', `${row.arrival_distance_m} m from site`);
   r = await call('POST', `/pickups/${j1}/finish`, { token: D2, body: {} });
   rec('Security', 'Another driver cannot finish this job', r.status === 403, r.status);
-  const invB = q.get(`SELECT COUNT(*) c FROM customer_notifications WHERE customer_id=? AND kind='completed'`, sites[0].id).c;
+  const invB = await count('customerNotification', { customer_id: sites[0].id, kind: 'completed' });
   r = await call('POST', `/pickups/${j1}/finish`, { token: D1, body: { checklist: ['Bins emptied'] } });
-  row = q.get(`SELECT * FROM pickups WHERE id=?`, j1);
+  row = await one('pickup', { id: j1 });
   rec('Driver', 'Finish completes the job with the arrival photo as proof (no second photo)', r.status === 200 && row.status === 'collected' && row.photo_url === '/uploads/ok1.jpg' && row.gps_lat === sites[0].lat && JSON.parse(row.proof_meta).proof === 'arrival' && JSON.parse(row.checklist)[0] === 'Bins emptied', row.status);
   rec('Driver', 'Job times are returned: drive, on site, total', r.body.travel_s >= 0 && r.body.on_site_s >= 0 && r.body.total_s >= 0 && !!r.body.arrived_at, `drive ${r.body.travel_s}s, on site ${r.body.on_site_s}s`);
-  rec('Driver', 'The customer is told the service is completed', q.get(`SELECT COUNT(*) c FROM customer_notifications WHERE customer_id=? AND kind='completed'`, sites[0].id).c === invB + 1, 'notified');
+  rec('Driver', 'The customer is told the service is completed', await count('customerNotification', { customer_id: sites[0].id, kind: 'completed' }) === invB + 1, 'notified');
   r = await call('POST', `/pickups/${j1}/finish`, { token: D1, body: {} });
   rec('Driver', 'A finished job cannot be finished again', r.status === 409, r.body.error);
 
-  const j2 = job(sites[1]);
+  const j2 = await job(sites[1]);
   await call('POST', `/pickups/${j2}/arrive-proof`, { token: D1, body: photo(sites[1]), file: F('ok2.jpg') });
-  rec('Driver', 'Arriving without tapping Start still starts the job timer', !!q.get(`SELECT started_at s FROM pickups WHERE id=?`, j2).s, 'started_at set');
+  rec('Driver', 'Arriving without tapping Start still starts the job timer', !!(await one('pickup', { id: j2 })).started_at, 'started_at set');
   r = await call('POST', `/pickups/${j2}/issue`, { token: D1, body: { reason: 'WEATHER' } });
   rec('Driver', 'An unknown issue reason is refused', r.status === 400, r.body.error);
   r = await call('POST', `/pickups/${j2}/issue`, { token: D1, body: { reason: 'CLOSED' } });
-  row = q.get(`SELECT * FROM pickups WHERE id=?`, j2);
+  row = await one('pickup', { id: j2 });
   rec('Driver', 'Site closed is reported with the arrival photo and goes to the customer to confirm', r.status === 200 && row.status === 'canceled' && row.anomaly_reason === 'CLOSED' && row.photo_url === '/uploads/ok2.jpg' && row.confirmation_status === 'awaiting', row.confirmation_status);
-  rec('Driver', 'The office gets a not-picked-up alert', !!q.get(`SELECT 1 x FROM alerts WHERE type='ANOMALY' AND pickup_id=?`, j2), 'ANOMALY alert');
+  rec('Driver', 'The office gets a not-picked-up alert', !!(await one('alert', { type: 'ANOMALY', pickup_id: j2 })), 'ANOMALY alert');
 
-  const j3 = job(sites[2], d2);
+  const j3 = await job(sites[2], d2);
   r = await call('POST', `/pickups/${j3}/ack`, { token: D2 });
-  const auto = q.get(`SELECT * FROM driver_shifts WHERE driver_id=?`, d2.id);
+  const auto = await one('driverShift', { driver_id: d2.id });
   rec('Shift', 'Starting a job without clocking in opens a flagged shift, so no time is lost', !!auto && auto.auto_in === 1 && !auto.clock_out_at, 'auto_in');
-  const j4 = job(sites[3]);
+  const j4 = await job(sites[3]);
   r = await call('POST', `/pickups/${j4}/complete`, { token: D1, body: photo(sites[3]), file: F('old.jpg') });
-  rec('Driver', 'The older one-step complete route still works (native app, offline queue)', r.status === 200 && q.get(`SELECT status s FROM pickups WHERE id=?`, j4).s === 'collected', r.status);
+  rec('Driver', 'The older one-step complete route still works (native app, offline queue)', r.status === 200 && (await one('pickup', { id: j4 })).status === 'collected', r.status);
 
   r = await call('GET', '/driver/jobs-v3', { token: D1 });
   const fed = r.body.jobs.find(x => x.id === j1);
@@ -253,9 +257,13 @@ const lead = (o) => call('POST', '/leads', { token: A, body: { contact: 'Test', 
   rec('Shift', 'The route ledger carries start, arrival and distance for each stop', !!lr.started_at && !!lr.arrived_at && lr.arrival_distance_m === 0, 'started, arrived, 0 m');
   r = await call('POST', '/driver/shift/clock-out', { token: D1, body: {} });
   rec('Shift', 'Clock out closes the shift and returns the day\'s totals', r.status === 200 && !r.body.shift.open && r.body.shift.duration_s >= 0 && r.body.today.jobs_done >= 3, `${r.body.today.jobs_done} jobs`);
-  q.run(`UPDATE driver_shifts SET work_date=date(work_date,'-1 day'), clock_in_at=datetime(clock_in_at,'-1 day') WHERE driver_id=?`, d2.id);
+  // move the open shift back one day (SQL: date(work_date,'-1 day'), datetime(clock_in_at,'-1 day'))
+  for (const sh of await prisma.driverShift.findMany({ where: { driver_id: d2.id } })) {
+    const back = (s) => new Date(Date.parse(s.length === 10 ? s + 'T00:00:00Z' : s) - 864e5).toISOString();
+    await prisma.driverShift.update({ where: { id: sh.id }, data: { work_date: back(sh.work_date).slice(0, 10), clock_in_at: back(sh.clock_in_at) } });
+  }
   r = await call('GET', '/driver/shift', { token: D2 });
-  rec('Shift', 'A shift forgotten open yesterday is closed automatically', r.body.shift === null && q.get(`SELECT closed_by c FROM driver_shifts WHERE driver_id=?`, d2.id).c === 'auto', 'closed_by auto');
+  rec('Shift', 'A shift forgotten open yesterday is closed automatically', r.body.shift === null && (await one('driverShift', { driver_id: d2.id })).closed_by === 'auto', 'closed_by auto');
 
   const failed = results.filter(x => !x).length;
   console.log(`\nSUMMARY: ${results.length - failed} passed, ${failed} failed`);

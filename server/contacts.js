@@ -7,7 +7,7 @@
 //   Unique  a mobile number or email may belong to only one lead and one
 //           customer account (an account can have several sites that share it).
 // ─────────────────────────────────────────────────────────────
-const { q } = require('./db');
+const { prisma } = require('./db');
 
 // Numbering rules per country (digits after the country code, without the leading 0):
 //   UAE      mobile 9 digits starting 5 (50 123 4567) · landline 8 digits, area code 2,3,4,6,7 or 9 (4 123 4567)
@@ -105,17 +105,18 @@ const sameEmail = (a, b) => !!a && !!b && String(a).trim().toLowerCase() === Str
    opts.exceptLeadId     ignore this lead (editing it)
    opts.exceptAccountId  ignore this customer account and every site in it
    Returns null, or { type:'lead'|'customer', id, name, field:'mobile number'|'email', stage? } */
-function findDuplicate({ phone, email }, opts = {}) {
+async function findDuplicate({ phone, email }, opts = {}) {
   if (!phone && !email) return null;
   const hit = (row, rowPhone, rowEmail) => (phone && samePhone(phone, rowPhone)) ? 'mobile number' : (email && sameEmail(email, rowEmail)) ? 'email' : null;
 
-  const customers = q.all(`SELECT id, COALESCE(account_id, id) acct, name, branch, contact_phone, email FROM customers`);
+  const customers = (await prisma.customer.findMany({ select: { id: true, account_id: true, name: true, branch: true, contact_phone: true, email: true }, orderBy: { id: 'asc' } }))
+    .map(c => ({ ...c, acct: c.account_id ?? c.id }));   // COALESCE(account_id, id)
   for (const c of customers) {
     if (opts.exceptAccountId && Number(c.acct) === Number(opts.exceptAccountId)) continue;
     const field = hit(c, c.contact_phone, c.email);
     if (field) return { type: 'customer', id: c.acct, name: c.name + (c.branch ? ` (${c.branch})` : ''), field };
   }
-  const leads = q.all(`SELECT id, contact, company, phone, email, stage, customer_id FROM leads`);
+  const leads = await prisma.lead.findMany({ select: { id: true, contact: true, company: true, phone: true, email: true, stage: true, customer_id: true }, orderBy: { id: 'asc' } });
   for (const l of leads) {
     if (opts.exceptLeadId && Number(l.id) === Number(opts.exceptLeadId)) continue;
     // a won lead is the same party as its customer account, already checked above

@@ -1,21 +1,39 @@
 # ─────────────────────────────────────────────────────────────
-# GreenLoop production stack: app + Caddy (automatic HTTPS)
+# GreenLoop production stack: app + MongoDB + Caddy (automatic HTTPS)
 # 1. Copy .env.example to .env and fill it in
 # 2. Point your domain's DNS A record at this server
 # 3. docker compose -f docker-compose.prod.yml up -d
 # ─────────────────────────────────────────────────────────────
 services:
+  mongo:
+    image: mongo:7
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: mongosh --quiet --eval "try { rs.status().ok } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }).ok }"
+      interval: 5s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+
   app:
     image: node:22-alpine
     working_dir: /app
     volumes:
       - ..:/app
       - appdata:/data
-    command: sh -c "npm install --omit=dev && node server/index.js"
+    command: sh -c "npm install --omit=dev && npm run db:setup && node server/index.js"
     environment:
       PORT: 3000
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
-      DB_PATH: /data/greenloop.sqlite
+      DATABASE_URL: mongodb://mongo:27017/greenloop?replicaSet=rs0
+      UPLOAD_DIR: /data/uploads
+      DATA_DIR: /data
+      BACKUP_DIR: /data/backups
+    depends_on:
+      mongo:
+        condition: service_healthy
     restart: unless-stopped
 
   caddy:
@@ -35,3 +53,4 @@ services:
 volumes:
   appdata:
   caddydata:
+  mongodata:
