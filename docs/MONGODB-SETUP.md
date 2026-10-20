@@ -166,3 +166,20 @@ Your normal `greenloop` database is never touched by the tests.
 | Compass shows no `greenloop` database | The server hasn't started yet (MongoDB creates databases on the first write). |
 
 Still stuck? Run `npm run db:check`: it tells you whether it can connect and whether the replica set is on.
+
+## Team Atlas database: `greenloop_test`
+
+The team has a MongoDB Atlas cluster with a database named **`greenloop_test`**
+(Atlas project → Data Explorer → `greenloop_test`). To use it:
+
+1. In Atlas open **Connect → Drivers** and copy the `mongodb+srv://` string.
+2. Put it in your local `.env` (never in git), with `/greenloop_test` as the database:
+   ```
+   TEST_DATABASE_URL="mongodb+srv://USER:PASSWORD@CLUSTER_HOST.mongodb.net/greenloop_test?retryWrites=true&w=majority"
+   ```
+   then run `npm run test:mongo`. To run the app itself against it, set `DATABASE_URL` to the same string.
+3. In **Atlas → Network Access**, allow your IP (or `0.0.0.0/0` for Render).
+4. Ask the Atlas project owner to invite you under **Project → Access Manager** rather than sharing passwords in chat.
+
+> ⚠️ `npm run test:mongo` **empties** the database it runs against. Use `greenloop_test`
+> only for testing — production on Render must use a separate database (e.g. `greenloop`).
