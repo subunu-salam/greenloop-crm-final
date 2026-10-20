@@ -7,8 +7,8 @@ import { useAuthStore } from '../store/auth'
 
 export default function Login() {
   const { t, i18n } = useTranslation()
-  const [username, setUsername] = useState('admin')
-  const [password, setPassword] = useState('admin123')
+  const [username, setUsername] = useState('demo')
+  const [password, setPassword] = useState('demo123')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const setToken = useAuthStore((s) => s.setToken)

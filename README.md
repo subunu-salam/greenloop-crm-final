@@ -300,3 +300,13 @@ field names stay snake_case, dates stay `YYYY-MM-DD` text, yes/no flags stay 0/1
 | `npm test` | All unit suites against an in-memory stand-in for Prisma (no database needed, CI) |
 | `npm run test:mongo` | The same suites against your real MongoDB (database `greenloop_test`, emptied each run) |
 | `npm run test:e2e` | Boots the real server against MongoDB (database `greenloop_e2e`) |
+
+## Demo logins
+
+Created automatically on every start (set `DEMO_LOGINS=0` to disable):
+
+| App | Login |
+|---|---|
+| CRM (`/crm`) | username `demo` · password `demo123` |
+| Driver (`/driver`) | PIN `0000` |
+| Customer (`/customer`) | mobile `050 000 9999` · code `9999` |
