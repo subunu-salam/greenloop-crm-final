@@ -1,3 +1,5 @@
+// Settings from .env (DATABASE_URL, JWT_SECRET, mail keys …) — set before anything reads them.
+require('../scripts/load-env');
 // Security bootstrap must run first: it guarantees a strong JWT secret
 // before any module reads process.env.JWT_SECRET.
 const security = require('./security');
@@ -7,7 +9,7 @@ const express = require('express');
 const http = require('http');
 const path = require('path');
 const { Server } = require('socket.io');
-const dbMod = require('./db');
+const dbMod = require('./db');               // MongoDB through Prisma
 const buildApi = require('./api');
 const { mountCustomerRoutes } = require('./customer-api');
 const { mountTrackingRoutes } = require('./tracking-api');
@@ -120,16 +122,20 @@ io.on('connection', (socket) => {
 });
 
 async function boot() {
-  if (dbMod.isPg && dbMod.ensureSchema) {
-    console.log('✔ Using Neon / PostgreSQL');
-    await dbMod.ensureSchema();
-    const seeded = await dbMod.seed();
-    if (seeded) console.log('✔ Seeded demo data');
-  } else {
-    const seeded = dbMod.seed();
-    if (seeded) console.log('✔ Seeded SQLite demo');
-    require('./customer-api').seedPortalCodes();
+  // 1. connect to MongoDB (DATABASE_URL in .env) — fails fast with a clear message
+  try {
+    await dbMod.prisma.$connect();
+    console.log('✔ Connected to MongoDB');
+  } catch (e) {
+    console.error('\n✖ Could not connect to MongoDB. Check DATABASE_URL in .env and that MongoDB is running as a replica set.\n  See docs/MONGODB-SETUP.md\n');
+    throw e;
   }
+  // 2. first-run data: demo fleet + customers, service catalogue, settings, rewards
+  const seeded = await dbMod.seed();
+  if (seeded) console.log('✔ Seeded demo data');
+  await v3.init();
+  await growth.init();
+  await require('./customer-api').seedPortalCodes();
   try {
     require('./push');
     console.log('✔ Web Push (VAPID) ready');
@@ -138,20 +144,28 @@ async function boot() {
   }
   try {
     const now = new Date();
-    const gen = scheduler.generateMonth(now.getFullYear(), now.getMonth() + 1);
+    const gen = await scheduler.generateMonth(now.getFullYear(), now.getMonth() + 1);
     if (gen && !gen.skipped) console.log(`✔ Generated ${gen.created} pickups`);
   } catch (e) {
     console.warn('Scheduler:', e.message);
   }
+  // 3. background jobs
   try {
     sla.start(io);
-    v3.start(io);
-    growth.startHealth();
+    await v3.start(io);
+    await growth.startHealth();
   } catch (e) {
-    console.warn('SLA:', e.message);
+    console.warn('Background jobs:', e.message);
   }
   server.listen(PORT, () => {
     console.log(`GreenLoop on :${PORT} · PWA push enabled`);
+  });
+}
+
+// close the MongoDB connection cleanly when the server is stopped (Ctrl+C, Render restart)
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => {
+    try { await dbMod.prisma.$disconnect(); } finally { process.exit(0); }
   });
 }
 

@@ -1,4 +1,4 @@
-const { call, tok, db, v3 } = require('./harness'); const { q } = db;
+const { call, tok, prisma, v3, ready } = require('./harness');
 const S = require('../../server/security');
 const bcrypt = require('bcryptjs');
 const A = tok({ id: 1, role: 'admin', crm_role: 'owner', name: 'Owner' });
@@ -6,6 +6,7 @@ const results = []; const rec = (area, test, ok, detail) => { results.push({ are
 const today = new Date().toISOString().slice(0, 10);
 const addDays = (n) => { const d = new Date(today + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 (async () => {
+  await ready;
   // ---------- LOGIN ABUSE ----------
   const custT = S.loginThrottle('customer', { max: 5, idFrom: (r) => r.body && r.body.phone });
   let first429 = 0; for (let i = 1; i <= 60; i++) { const r = await call('POST', '/auth/customer-login', { pre: [custT], body: { phone: '0500001001', code: String(200000 + i) } }); if (r.status === 429 && !first429) first429 = i; }
@@ -17,7 +18,7 @@ const addDays = (n) => { const d = new Date(today + 'T00:00:00Z'); d.setUTCDate(
   rec('Security', 'Code without a mobile number is refused', r.status === 400, `status ${r.status}`);
   let n = 0; const orig = bcrypt.compareSync; bcrypt.compareSync = (...a) => { n++; return orig(...a); };
   await call('POST', '/auth/customer-login', { body: { phone: '0500001002', code: '999999' } }); bcrypt.compareSync = orig;
-  rec('Performance', 'Login checks only the matching account (not every customer)', n <= 1, `${n} password check(s) for ${q.get('SELECT COUNT(*) c FROM customers').c} customers`);
+  rec('Performance', 'Login checks only the matching account (not every customer)', n <= 1, `${n} password check(s) for ${await prisma.customer.count()} customers`);
   S._resetThrottles();
   const drvT = S.loginThrottle('driver', { max: 8 });
   first429 = 0; for (let i = 1; i <= 30; i++) { const x = await call('POST', '/auth/driver-login', { pre: [drvT], body: { pin: String(5000 + i) } }); if (x.status === 429 && !first429) first429 = i; }
@@ -41,37 +42,37 @@ const addDays = (n) => { const d = new Date(today + 'T00:00:00Z'); d.setUTCDate(
   const jl = await call('GET', '/dashboard', { token: A, pre: [S.signUploadLinks] });
   rec('Security', 'API responses carry signed photo links', !JSON.stringify(jl.body).match(/"\/uploads\/[^"?]+"/));
   // ---------- DRIVER RULES ----------
-  const drv = q.all("SELECT id, vehicle_id FROM users WHERE role='driver' ORDER BY id LIMIT 2");
-  const c = q.get('SELECT id, name, lat, lng FROM customers WHERE is_active=1 ORDER BY id DESC LIMIT 1');
-  let k = 0; const job = (did, vid, date) => q.run(`INSERT INTO pickups(customer_id,driver_id,vehicle_id,scheduled_date,status,service_type) VALUES (?,?,?,?, 'pending','WASTE')`, c.id, did, vid, date || today).lastInsertRowid;
+  const drv = await prisma.user.findMany({ where: { role: 'driver' }, select: { id: true, vehicle_id: true }, orderBy: { id: 'asc' }, take: 2 });
+  const c = await prisma.customer.findFirst({ where: { is_active: 1 }, select: { id: true, name: true, lat: true, lng: true }, orderBy: { id: 'desc' } });
+  const job = async (did, vid, date) => (await prisma.pickup.create({ data: { customer_id: c.id, driver_id: did, vehicle_id: vid, scheduled_date: date || today, status: 'pending', service_type: 'WASTE' } })).id;
   const now = new Date().toISOString();
   const proof = (extra = {}) => ({ lat: c.lat, lng: c.lng, photo_taken_at: now, device_now: now, stamped: '1', stamp_text: c.name, source: 'camera', ...extra });
   const D0 = tok({ id: drv[0].id, role: 'driver', name: 'D0', vehicle_id: drv[0].vehicle_id }), D1 = tok({ id: drv[1].id, role: 'driver', name: 'D1', vehicle_id: drv[1].vehicle_id });
   const file = { filename: 'p.jpg', path: '/tmp/none' };
-  let id = job(null, drv[0].vehicle_id); // unassigned job on driver 0's truck; driver 1 tries it
+  let id = await job(null, drv[0].vehicle_id); // unassigned job on driver 0's truck; driver 1 tries it
   r = await call('POST', `/pickups/${id}/complete`, { token: D1, file, body: proof() });
   rec('Feature', 'Unassigned job cannot be completed by a random driver', r.status === 403, `status ${r.status}`);
-  id = job(drv[0].id, drv[0].vehicle_id);
+  id = await job(drv[0].id, drv[0].vehicle_id);
   r = await call('POST', `/pickups/${id}/ack`, { token: D1 });
   rec('Feature', "Driver cannot send 'on the way' for someone else's job", r.status === 403, `status ${r.status}`);
   r = await call('POST', `/pickups/${id}/cancel`, { token: D1, file, body: proof({ reason: 'CLOSED' }) });
   rec('Feature', "Driver cannot report another driver's job not picked up", r.status === 403, `status ${r.status}`);
-  id = job(drv[0].id, drv[0].vehicle_id, addDays(3));
+  id = await job(drv[0].id, drv[0].vehicle_id, addDays(3));
   r = await call('POST', `/pickups/${id}/complete`, { token: D0, file, body: proof() });
   rec('Feature', 'Future job cannot be completed today', r.status === 409, `status ${r.status}: ${r.body.error}`);
-  id = job(drv[0].id, drv[0].vehicle_id);
+  id = await job(drv[0].id, drv[0].vehicle_id);
   r = await call('POST', `/pickups/${id}/complete`, { token: D0, file, body: proof({ photo_taken_at: new Date(Date.now() - 2 * 3600e3).toISOString() }) });
   rec('Proof', '2-hour-old photo rejected when sent live', r.status === 422, `status ${r.status} ${JSON.stringify(r.body.problems || '')}`);
-  const before = q.get("SELECT COUNT(*) c FROM alerts WHERE type='LATE_PROOF'").c;
+  const before = await prisma.alert.count({ where: { type: 'LATE_PROOF' } });
   r = await call('POST', `/pickups/${id}/complete`, { token: D0, file, body: proof({ photo_taken_at: new Date(Date.now() - 2 * 3600e3).toISOString(), queued: '1' }) });
-  const after = q.get("SELECT COUNT(*) c FROM alerts WHERE type='LATE_PROOF'").c;
+  const after = await prisma.alert.count({ where: { type: 'LATE_PROOF' } });
   rec('Proof', 'Same photo from the offline queue accepted and flagged to office', r.status === 200 && after === before + 1, `status ${r.status}, office alerts +${after - before}`);
-  id = job(drv[0].id, drv[0].vehicle_id);
+  id = await job(drv[0].id, drv[0].vehicle_id);
   r = await call('POST', `/pickups/${id}/complete`, { token: D0, file, body: proof() });
   const r2 = await call('POST', `/pickups/${id}/complete`, { token: D0, file, body: proof() });
   rec('Proof', 'Fresh proof accepted once, duplicate blocked', r.status === 200 && r2.status === 409, `${r.status} then ${r2.status}`);
   for (const [label, b] of [['missing GPS', { lat: '', lng: '' }], ['gallery photo', { source: 'gallery' }], ['unstamped photo', { stamped: '0' }], ['lat 999', { lat: 999, lng: 999 }]]) {
-    id = job(drv[0].id, drv[0].vehicle_id); r = await call('POST', `/pickups/${id}/complete`, { token: D0, file, body: proof(b) });
+    id = await job(drv[0].id, drv[0].vehicle_id); r = await call('POST', `/pickups/${id}/complete`, { token: D0, file, body: proof(b) });
     rec('Proof', 'Rejects ' + label, r.status === 422, `status ${r.status}`);
   }
   // ---------- VALIDATION ----------
@@ -108,23 +109,23 @@ const addDays = (n) => { const d = new Date(today + 'T00:00:00Z'); d.setUTCDate(
   const g1 = await call('POST', '/invoices/generate', { token: A, body: { period: today.slice(0, 7) } });
   const g2 = await call('POST', '/invoices/generate', { token: A, body: { period: today.slice(0, 7) } });
   rec('Billing', 'Invoicing twice does not double-bill', (g2.body.created || 0) === 0, `1st ${g1.body.created}, 2nd ${g2.body.created}`);
-  const nums = q.all('SELECT number FROM invoices').map((x) => x.number);
+  const nums = (await prisma.invoice.findMany({ select: { number: true } })).map((x) => x.number);
   rec('Billing', 'Invoice numbers are unique', new Set(nums).size === nums.length, `${nums.length} invoices`);
-  const inv = q.get("SELECT id FROM invoices WHERE status!='void' LIMIT 1");
+  const inv = await prisma.invoice.findFirst({ where: { status: { not: 'void' } }, orderBy: { id: 'asc' } });
   for (const [label, amount] of [['negative', -50], ['zero', 0], ['text', 'abc'], ['over balance', 1e7]]) {
     r = await call('POST', '/payments', { token: A, body: { invoice_id: inv.id, amount, method: 'cash' } });
     rec('Billing', 'Payment rejects ' + label + ' amount', r.status === 400, `status ${r.status}`);
   }
-  const other = q.get('SELECT id FROM customers WHERE COALESCE(account_id,id) != (SELECT customer_id FROM invoices WHERE id=?) LIMIT 1', inv.id);
+  const other = (await prisma.customer.findMany({ orderBy: { id: 'asc' } })).find((x) => (x.account_id ?? x.id) !== inv.customer_id);
   r = await call('GET', `/invoices/${inv.id}/pdf`, { token: tok({ id: other.id, role: 'customer', customer_id: other.id, name: 'X' }) });
   rec('Security', "Customer cannot open another customer's invoice", r.status === 403, `status ${r.status}`);
   // ---------- NIGHTLY / BACKUP ----------
-  const pc = q.all('SELECT id FROM customers WHERE is_active=1 ORDER BY id LIMIT 60');
-  pc.forEach((x) => q.run(`INSERT INTO service_plans(customer_id,service_code,recurrence,time_window,start_date,unit_price,billing,status) VALUES (?,?,?,?,?,?,?,?)`, x.id, 'WASTE', JSON.stringify({ type: 'weekly', days: [0, 2, 4] }), '07:00-12:00', today, 150, 'monthly', 'active'));
+  const pc = await prisma.customer.findMany({ where: { is_active: 1 }, select: { id: true }, orderBy: { id: 'asc' }, take: 60 });
+  await prisma.servicePlan.createMany({ data: pc.map((x) => ({ customer_id: x.id, service_code: 'WASTE', recurrence: JSON.stringify({ type: 'weekly', days: [0, 2, 4] }), time_window: '07:00-12:00', start_date: today, unit_price: 150, billing: 'monthly', status: 'active' })) });
   const g = await v3.generatePlansBatched({ days: 14 });
   rec('Reliability', 'Nightly planning runs in batches', g.plans >= pc.length && g.created > 0, `${g.plans} plans, ${g.created} new jobs`);
-  v3.dailyBackup();
-  const bdir = require('path').join(require('path').dirname(process.env.DB_PATH), 'backups');
+  await v3.dailyBackup();
+  const bdir = require('path').join(process.env.DATA_DIR, 'backups');
   const files = require('fs').existsSync(bdir) ? require('fs').readdirSync(bdir) : [];
   rec('Reliability', 'Daily backup file written', files.some((f) => f.startsWith('greenloop-' + today)), files.join(', '));
   const bad = results.filter((x) => !x.ok);

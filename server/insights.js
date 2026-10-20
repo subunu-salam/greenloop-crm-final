@@ -15,7 +15,7 @@
 //
 // Times: Dubai local time (UTC+4, no daylight saving).
 // ─────────────────────────────────────────────────────────────
-const { q } = require('./db');
+const { prisma, join, getSetting } = require('./db');
 
 const TZ_MIN = 240;                        // Dubai = UTC+4
 const GRACE = 10;                          // minutes after the window before a stop counts as late
@@ -53,17 +53,23 @@ function windowEnd(tw, fallback = 720) {
 function rng(seed) { let s = seed >>> 0; return () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
 // ── data: live ───────────────────────────────────────────────
-function liveJobs(from, to) {
+async function liveJobs(from, to) {
   let cutoff = 720;
-  try { const s = q.get(`SELECT value FROM settings WHERE key='shift_cutoff'`); if (s && /^\d{1,2}:\d{2}$/.test(s.value)) cutoff = windowEnd(s.value); } catch { /* old database */ }
-  const rows = q.all(`SELECT p.id, p.scheduled_date d, p.status, p.anomaly_reason reason, p.time_window tw, p.arrived_at, p.completed_at,
-      p.driver_id, u.full_name driver, v.fleet_number truck, p.vehicle_id, c.zone, c.name customer, c.branch, c.id cid, p.service_type service
-    FROM pickups p JOIN customers c ON c.id=p.customer_id LEFT JOIN users u ON u.id=p.driver_id LEFT JOIN vehicles v ON v.id=p.vehicle_id
-    WHERE p.scheduled_date BETWEEN ? AND ? AND p.status != 'rescheduled'`, from, to);
-  return rows.map(r => normalise({ ...r, end: windowEnd(r.tw, cutoff), actual: localMinutes(r.arrived_at || r.completed_at) }));
+  try { const s = await getSetting('shift_cutoff', null); if (s && /^\d{1,2}:\d{2}$/.test(s)) cutoff = windowEnd(s); } catch { /* not set */ }
+  let rows = await prisma.pickup.findMany({
+    where: { scheduled_date: { gte: from, lte: to }, status: { not: 'rescheduled' } },
+    select: { id: true, scheduled_date: true, status: true, anomaly_reason: true, time_window: true, arrived_at: true, completed_at: true, driver_id: true, vehicle_id: true, customer_id: true, service_type: true },
+    orderBy: { id: 'asc' },
+  });
+  rows = await join(rows, 'customer_id', 'customer', { zone: 'zone', customer: 'name', branch: 'branch', cid: 'id' }, { inner: true });
+  rows = await join(rows, 'driver_id', 'user', { driver: 'full_name' });
+  rows = await join(rows, 'vehicle_id', 'vehicle', { truck: 'fleet_number' });
+  // rename to the short names the analysis code uses (SQL "AS" aliases)
+  return rows.map(r => normalise({ ...r, d: r.scheduled_date, reason: r.anomaly_reason, tw: r.time_window, service: r.service_type,
+    end: windowEnd(r.time_window, cutoff), actual: localMinutes(r.arrived_at || r.completed_at) }));
 }
-function liveFleet() {
-  const v = q.all(`SELECT fleet_number, max_daily_capacity cap FROM vehicles WHERE is_active=1`);
+async function liveFleet() {
+  const v = (await prisma.vehicle.findMany({ where: { is_active: 1 }, select: { fleet_number: true, max_daily_capacity: true } })).map(x => ({ fleet_number: x.fleet_number, cap: x.max_daily_capacity }));
   return { trucks: v.length, capacity: sum(v.map(x => Number(x.cap) || 15)) || 15 * Math.max(1, v.length), perTruck: v.length ? Math.round(sum(v.map(x => Number(x.cap) || 15)) / v.length) : 15 };
 }
 
@@ -140,14 +146,14 @@ function demoData(today) {
 }
 
 // ── loading ──────────────────────────────────────────────────
-function load(source = 'auto') {
+async function load(source = 'auto') {
   const today = todayLocal();
   if (source !== 'demo') {
-    const jobs = liveJobs(addDays(today, -70), addDays(today, -1));
+    const jobs = await liveJobs(addDays(today, -70), addDays(today, -1));
     const closed28 = jobs.filter(j => j.date >= addDays(today, -28) && j.status !== 'pending').length;
     if (source === 'live' || closed28 >= 150) {
-      const future = liveJobs(today, addDays(today, 14)).filter(j => j.status === 'pending' || j.status === 'overdue');
-      return { source: 'live', today, jobs: jobs.filter(j => j.status !== 'pending'), future, fleet: liveFleet(), closed28 };
+      const future = (await liveJobs(today, addDays(today, 14))).filter(j => j.status === 'pending' || j.status === 'overdue');
+      return { source: 'live', today, jobs: jobs.filter(j => j.status !== 'pending'), future, fleet: await liveFleet(), closed28 };
     }
     const d = demoData(today);
     return { source: 'demo', today, ...d, closed28, note: `Your data has ${closed28} finished jobs in the last 28 days; insights need about 150, so this view uses demo data until then.` };
@@ -400,8 +406,8 @@ function weeklyReport(D, end) {
 }
 
 // ── the whole page ───────────────────────────────────────────
-function overview(source) {
-  const D = load(source);
+async function overview(source) {
+  const D = await load(source);
   const dd = driverDelays(D), fc = forecast(D), risk = delayRisk(D);
   const recs = recommendations(D, dd, fc, risk);
   const wk = weeklyReport(D);
@@ -414,4 +420,4 @@ function overview(source) {
 }
 
 const withSource = (D, rep) => ({ source: D.source, note: D.note || null, ...rep });
-module.exports = { overview, dailyReport: (source, date) => { const D = load(source); return withSource(D, dailyReport(D, date)); }, weeklyReport: (source, end) => { const D = load(source); return withSource(D, weeklyReport(D, end)); }, _internal: { load, kpis, forecast, fitForecast, riskModel, demoData, windowEnd, localMinutes } };
+module.exports = { overview, dailyReport: async (source, date) => { const D = await load(source); return withSource(D, dailyReport(D, date)); }, weeklyReport: async (source, end) => { const D = await load(source); return withSource(D, weeklyReport(D, end)); }, _internal: { load, kpis, forecast, fitForecast, riskModel, demoData, windowEnd, localMinutes } };

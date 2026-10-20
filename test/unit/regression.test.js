@@ -1,7 +1,8 @@
-const { call, tok, db, v3 } = require('./harness');
-const { q } = db;
+const { call, tok, prisma, v3, ready } = require('./harness');
+const { join } = require('../../server/db');
 const assert = require('assert');
 (async () => {
+  await ready;
   const A = tok({ id: 1, role: 'admin', crm_role: 'owner', name: 'Owner' });
   const OPS = tok({ id: 9, role: 'admin', crm_role: 'ops', name: 'Ops' });
   // recurrence unit tests
@@ -30,29 +31,31 @@ const assert = require('assert');
   assert(r.body.whatsapp_url.startsWith('https://wa.me/971501234567?text=')); console.log('✔ quote v2 + wa.me', r.body.link);
   r = await call('GET', `/quotations/${qid}/pdf`, { token: A }); assert(String(r.body).includes('VAT 5%'));
   r = await call('POST', `/quotations/${qid}/convert`, { token: A }); assert.equal(r.status, 409);
-  const share = q.get('SELECT share_token FROM quotations WHERE id=?', qid).share_token;
+  const share = (await prisma.quotation.findUnique({ where: { id: qid } })).share_token;
   r = await call('POST', `/public/quotations/${share}/accept`, {}); assert.equal(r.status, 200);
   r = await call('POST', `/quotations/${qid}/convert`, { token: OPS });
   assert.equal(r.status, 200, JSON.stringify(r.body)); console.log('✔ convert', r.body.sites, 'sites,', r.body.plans, 'plans,', r.body.jobs_generated, 'jobs, code', r.body.portal_code);
   const acct = r.body.customer_id;
   // capacity invariant
-  const over = q.all(`SELECT v.fleet_number, p.scheduled_date, COUNT(*) c, v.max_daily_capacity cap FROM pickups p JOIN vehicles v ON v.id=p.vehicle_id WHERE p.status IN ('pending','collected','overdue') AND p.plan_id IS NOT NULL GROUP BY p.vehicle_id, p.scheduled_date HAVING c > cap`);
+  const loads = await prisma.pickup.groupBy({ by: ['vehicle_id', 'scheduled_date'], where: { status: { in: ['pending', 'collected', 'overdue'] }, plan_id: { not: null }, vehicle_id: { not: null } }, _count: { _all: true } });
+  const caps = new Map((await prisma.vehicle.findMany()).map(v => [v.id, v.max_daily_capacity]));
+  const over = loads.filter(g => g._count._all > caps.get(g.vehicle_id));
   console.log('  capacity violations by plan jobs:', over.length);
-  const pest = q.get(`SELECT COUNT(*) c FROM pickups WHERE service_type='PEST_GENERAL'`).c;
-  const unalloc = q.get(`SELECT COUNT(*) c FROM pickups WHERE service_type='PEST_GENERAL' AND vehicle_id IS NULL`).c;
+  const pest = await prisma.pickup.count({ where: { service_type: 'PEST_GENERAL' } });
+  const unalloc = await prisma.pickup.count({ where: { service_type: 'PEST_GENERAL', vehicle_id: null } });
   console.log('  pest jobs', pest, 'unallocated (no pest-tagged vehicle yet):', unalloc);
   // tag vehicle 2 for pest, regen
   await call('PUT', '/vehicles/2/tags', { token: A, body: { service_tags: ['waste', 'pest'] } });
-  const plan = q.get(`SELECT * FROM service_plans WHERE service_code='PEST_GENERAL'`);
+  const plan = await prisma.servicePlan.findFirst({ where: { service_code: 'PEST_GENERAL' } });
   r = await call('PUT', '/service-plans/' + plan.id, { token: A, body: { recurrence: { type: 'weekly', days: [1, 3] } } });
   console.log('  plan edit regen', r.body);
-  assert.equal(q.get(`SELECT COUNT(*) c FROM pickups WHERE plan_id=? AND vehicle_id IS NULL AND status='pending'`, plan.id).c, 0);
+  assert.equal(await prisma.pickup.count({ where: { plan_id: plan.id, vehicle_id: null, status: 'pending' } }), 0);
   // ops blocked
   // (guard is middleware on the app; simulate)
   let blocked = false; v3.guard({ headers: { authorization: 'Bearer ' + OPS }, method: 'POST', path: '/payments', body: {} }, { status: () => ({ json: () => { blocked = true; } }), on() {} }, () => {});
   assert(blocked); console.log('✔ ops blocked from payments');
   // driver completes job with proof
-  const job = q.get(`SELECT p.*, c.lat, c.lng, c.name FROM pickups p JOIN customers c ON c.id=p.customer_id WHERE p.customer_id=? AND p.scheduled_date=? AND p.service_type='WASTE'`, acct, new Date().toISOString().slice(0, 10));
+  const [job] = await join(await prisma.pickup.findMany({ where: { customer_id: acct, scheduled_date: new Date().toISOString().slice(0, 10), service_type: 'WASTE' }, take: 1 }), 'customer_id', 'customer', ['lat', 'lng', 'name']);
   const D = tok({ id: job.driver_id, role: 'driver', name: 'Drv' });
   const now = new Date().toISOString();
   r = await call('POST', `/pickups/${job.id}/complete`, { token: D, file: { filename: 'x.jpg', path: '/tmp/none' }, body: { lat: job.lat + 0.01, lng: job.lng, photo_taken_at: now, device_now: now, stamped: '1', stamp_text: job.name + ' | x', source: 'camera' } });
@@ -63,9 +66,13 @@ const assert = require('assert');
   assert.equal(r.status, 200, JSON.stringify(r.body)); console.log('✔ valid photo accepted at', r.body.distance_m, 'm');
   // not picked up on another job
   const today = new Date().toISOString().slice(0, 10);
-  const job2 = q.get(`SELECT p.*, c.lat, c.lng, c.name FROM pickups p JOIN customers c ON c.id=p.customer_id WHERE p.customer_id=? AND p.status='pending' AND p.scheduled_date>? AND p.plan_id!=? ORDER BY p.scheduled_date LIMIT 1`, acct, today, job.plan_id);
-  q.run(`DELETE FROM pickups WHERE plan_id=? AND scheduled_date=? AND id!=? AND status='pending'`, job2.plan_id, today, job2.id);
-  q.run(`UPDATE pickups SET scheduled_date=? WHERE id=?`, today, job2.id);
+  // SQL "plan_id != x" never matches NULL; in MongoDB "not" does, so exclude null explicitly
+  const [job2] = await join(await prisma.pickup.findMany({
+    where: { customer_id: acct, status: 'pending', scheduled_date: { gt: today }, AND: [{ plan_id: { not: null } }, { plan_id: { not: job.plan_id } }] },
+    orderBy: [{ scheduled_date: 'asc' }, { id: 'asc' }], take: 1,
+  }), 'customer_id', 'customer', ['lat', 'lng', 'name']);
+  await prisma.pickup.deleteMany({ where: { plan_id: job2.plan_id, scheduled_date: today, id: { not: job2.id }, status: 'pending' } });
+  await prisma.pickup.update({ where: { id: job2.id }, data: { scheduled_date: today } });
   const D2 = tok({ id: job2.driver_id, role: 'driver', name: 'Drv2' });
   r = await call('POST', `/pickups/${job2.id}/cancel`, { token: D2, file: { filename: 'y.jpg', path: '/tmp/none' }, body: { reason: 'CLOSED', lat: job2.lat, lng: job2.lng, photo_taken_at: now, device_now: now, stamped: '1', stamp_text: job2.name, source: 'camera' } });
   assert.equal(r.body.confirmation_status, 'awaiting', JSON.stringify(r.body));
@@ -75,7 +82,8 @@ const assert = require('assert');
   console.log('✔ dispute →', r.body);
   // invoices
   r = await call('POST', '/invoices/generate', { token: A, body: { period: new Date().toISOString().slice(0, 7) } });
-  const inv = r.body.invoices.find(i => q.get('SELECT customer_id FROM invoices WHERE id=?', i.id).customer_id === acct);
+  const accountInvoices = await prisma.invoice.findMany({ where: { customer_id: acct }, select: { id: true } });
+  const inv = r.body.invoices.find(i => accountInvoices.some(x => x.id === i.id));
   console.log('✔ invoices created', r.body.created, 'acct invoice', inv);
   assert.equal(inv.amount, 147); // 140 + 5%
   r = await call('POST', '/payments', { token: A, body: { invoice_id: inv.id, amount: 200, method: 'cash' } }); assert.equal(r.status, 400);
@@ -97,9 +105,9 @@ const assert = require('assert');
   r = await call('POST', '/pickups/adhoc', { token: A, body: { customer_id: 1, date: new Date(Date.now() + 3 * 864e5).toISOString().slice(0, 10) } }); assert.equal(r.status, 409);
   console.log('✔ bookings + ad-hoc validations');
   // auto-confirm
-  const job3 = q.get(`SELECT id FROM pickups WHERE status='pending' LIMIT 1`).id;
-  q.run(`UPDATE pickups SET status='canceled', confirmation_status='awaiting', confirm_deadline='2000-01-01' WHERE id=?`, job3);
-  assert.equal(v3.autoConfirm(), 1); console.log('✔ auto-confirm after 24h');
+  const job3 = (await prisma.pickup.findFirst({ where: { status: 'pending' }, orderBy: { id: 'asc' } })).id;
+  await prisma.pickup.update({ where: { id: job3 }, data: { status: 'canceled', confirmation_status: 'awaiting', confirm_deadline: '2000-01-01' } });
+  assert.equal(await v3.autoConfirm(), 1); console.log('✔ auto-confirm after 24h');
   r = await call('GET', '/driver/jobs-v3', { token: D }); console.log('✔ driver jobs-v3', r.body.jobs.length, r.body.jobs[0] && r.body.jobs[0].maps_url);
   r = await call('GET', '/audit', { token: A }); console.log('✔ audit rows', r.body.length);
   console.log('ALL PASSED');

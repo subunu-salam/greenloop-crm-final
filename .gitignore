@@ -8,3 +8,4 @@ deploy/.env
 data/
 *.sqlite*
 .DS_Store
+backups/

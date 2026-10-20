@@ -1,7 +1,7 @@
 // Push notification routes: device registration + admin-wide broadcast (v3.2)
 const push = require('./push');
 const jwt = require('jsonwebtoken');
-const { q } = require('./db');
+const { prisma } = require('./db');
 require('./security').ensureSecret();
 const SECRET = process.env.JWT_SECRET;
 
@@ -23,15 +23,13 @@ function adminOnly(req, res, next) {
   });
 }
 
-q.run(`CREATE TABLE IF NOT EXISTS push_broadcasts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  audience TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, url TEXT,
-  recipients INTEGER NOT NULL DEFAULT 0, devices INTEGER NOT NULL DEFAULT 0,
-  delivered INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, removed INTEGER NOT NULL DEFAULT 0,
-  sent_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
-)`);
-
 const AUDIENCES = ['customers', 'drivers', 'all'];
+// One document per customer ACCOUNT: active sites that are not linked to another account.
+// SQL: account_id IS NULL OR account_id = id   (comparing two fields → done in JS)
+async function accountHolders() {
+  const rows = await prisma.customer.findMany({ where: { is_active: 1 }, select: { id: true, account_id: true }, orderBy: { id: 'asc' } });
+  return rows.filter((c) => c.account_id == null || c.account_id === c.id);
+}
 const clean = (s, n) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, n);
 
 // Stores the announcement in every customer's in-app inbox, shows it live in
@@ -42,26 +40,25 @@ async function broadcast(io, { audience, title, body, url, by }) {
 
   if (audience === 'customers' || audience === 'all') {
     // one inbox entry per account (multi-site customers read it once)
-    let accounts = [];
-    try { accounts = q.all(`SELECT id FROM customers WHERE is_active=1 AND (account_id IS NULL OR account_id=id)`); }
-    catch { accounts = q.all(`SELECT id FROM customers WHERE is_active=1`); }
+    const accounts = await accountHolders();
     const link = url || '/customer/';
-    for (const a of accounts) {
-      try { q.run(`INSERT INTO customer_notifications(customer_id,kind,title,body,link) VALUES (?,?,?,?,?)`, a.id, 'announcement', title, body, link); } catch { /* table is created by v3 */ }
-      if (io) for (const ref of push.customerRefs(a.id)) io.to('customer:' + ref).emit('customer:notify', { kind: 'announcement', title, body });
+    if (accounts.length) {
+      await prisma.customerNotification.createMany({ data: accounts.map((a) => ({ customer_id: a.id, kind: 'announcement', title, body, link })) });
     }
+    if (io) for (const a of accounts) for (const ref of await push.customerRefs(a.id)) io.to('customer:' + ref).emit('customer:notify', { kind: 'announcement', title, body });
     total.recipients += accounts.length;
     add(await push.sendToAll('customer', { title, body, url: link, kind: 'announcement' }));
   }
   if (audience === 'drivers' || audience === 'all') {
-    const drivers = q.all(`SELECT id FROM users WHERE role='driver' AND is_active=1`);
+    const drivers = await prisma.user.findMany({ where: { role: 'driver', is_active: 1 }, select: { id: true } });
     if (io) for (const d of drivers) io.to('driver:' + d.id).emit('driver:notify', { kind: 'info', title, body });
     total.recipients += drivers.length;
     add(await push.sendToAll('driver', { title, body, url: url || '/driver/', kind: 'announcement' }));
   }
-  const info = q.run(`INSERT INTO push_broadcasts(audience,title,body,url,recipients,devices,delivered,failed,removed,sent_by) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    audience, title, body, url || null, total.recipients, total.devices, total.delivered, total.failed, total.removed, by || null);
-  return { id: Number(info.lastInsertRowid), ...total, errors: [...new Set(total.errors)].slice(0, 5) };
+  const saved = await prisma.pushBroadcast.create({
+    data: { audience, title, body, url: url || null, recipients: total.recipients, devices: total.devices, delivered: total.delivered, failed: total.failed, removed: total.removed, sent_by: by || null },
+  });
+  return { id: saved.id, ...total, errors: [...new Set(total.errors)].slice(0, 5) };
 }
 
 function mountPushRoutes(r, io) {
@@ -69,7 +66,7 @@ function mountPushRoutes(r, io) {
     res.json({ publicKey: push.getPublicKey() });
   });
 
-  r.post('/push/subscribe', authAny, (req, res) => {
+  r.post('/push/subscribe', authAny, async (req, res) => {
     try {
       const subscription = (req.body || {}).subscription;
       if (!subscription) return res.status(400).json({ error: 'subscription required' });
@@ -80,23 +77,23 @@ function mountPushRoutes(r, io) {
           : String(req.user.id);
       // The same phone signing in as someone else moves the device to the new user
       // (endpoint is unique), so alerts never reach the previous account.
-      push.saveSubscription({ role, user_ref, subscription });
-      res.json({ ok: true, role, devices: push.hasSubscription(role, user_ref) });
+      await push.saveSubscription({ role, user_ref, subscription });
+      res.json({ ok: true, role, devices: await push.hasSubscription(role, user_ref) });
     } catch (e) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  r.post('/push/unsubscribe', authAny, (req, res) => {
+  r.post('/push/unsubscribe', authAny, async (req, res) => {
     const endpoint = (req.body || {}).endpoint;
-    if (endpoint) push.removeSubscription(endpoint);
+    if (endpoint) await push.removeSubscription(endpoint);
     res.json({ ok: true });
   });
 
   // Is this user reachable by push? (used by the apps to show an "Enable" prompt)
-  r.get('/push/status', authAny, (req, res) => {
+  r.get('/push/status', authAny, async (req, res) => {
     const ref = req.user.role === 'customer' ? (req.user.customer_id || req.user.id) : req.user.id;
-    res.json({ devices: push.hasSubscription(req.user.role, ref) });
+    res.json({ devices: await push.hasSubscription(req.user.role, ref) });
   });
 
   // Sends a test notification to the caller's own devices.
@@ -108,14 +105,11 @@ function mountPushRoutes(r, io) {
   });
 
   // ── Admin: reach + history + broadcast ──
-  r.get('/push/stats', adminOnly, (req, res) => {
-    let accounts = 0;
-    try { accounts = q.get(`SELECT COUNT(*) c FROM customers WHERE is_active=1 AND (account_id IS NULL OR account_id=id)`).c; }
-    catch { accounts = q.get(`SELECT COUNT(*) c FROM customers WHERE is_active=1`).c; }
+  r.get('/push/stats', adminOnly, async (req, res) => {
     res.json({
-      ...push.stats(),
-      totals: { customer_accounts: accounts, drivers: q.get(`SELECT COUNT(*) c FROM users WHERE role='driver' AND is_active=1`).c },
-      history: q.all(`SELECT * FROM push_broadcasts ORDER BY id DESC LIMIT 25`),
+      ...(await push.stats()),
+      totals: { customer_accounts: (await accountHolders()).length, drivers: await prisma.user.count({ where: { role: 'driver', is_active: 1 } }) },
+      history: await prisma.pushBroadcast.findMany({ orderBy: { id: 'desc' }, take: 25 }),
     });
   });
 

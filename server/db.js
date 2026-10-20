@@ -1,172 +1,135 @@
 // ─────────────────────────────────────────────────────────────
-// Database entry — SQLite (local) or Neon Postgres (DATABASE_URL)
+// Database entry — MongoDB through Prisma.
+//
+// Everything database-related that the rest of the server needs is exported
+// from here, so a module only has to write:
+//
+//   const { prisma, join, now } = require('./db');
+//
+// Connection string: DATABASE_URL in .env, e.g.
+//   mongodb://127.0.0.1:27017/greenloop?replicaSet=rs0
+// (Prisma needs MongoDB to run as a replica set — see docs/MONGODB-SETUP.md.)
 // ─────────────────────────────────────────────────────────────
-if (process.env.DATABASE_URL) {
-  // v3 features (quotations, plans, billing, proof checks) are SQLite-only.
-  console.error('\n✖ DATABASE_URL is set, but GreenLoop v3 runs on SQLite only.\n' +
-    '  Remove the DATABASE_URL environment variable and set DB_PATH to a file on a\n' +
-    '  persistent disk (e.g. /var/data/greenloop.sqlite). See render.yaml.\n');
-  process.exit(1);
-} else {
-  // Original SQLite implementation for local demo
-  const { DatabaseSync } = require('node:sqlite');
-  const path = require('path');
-  const bcrypt = require('bcryptjs');
+const bcrypt = require('bcryptjs');
+const P = require('./prisma');
+const { prisma } = P;
 
-  const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data.sqlite');
-  const db = new DatabaseSync(DB_PATH);
-  try { db.exec('PRAGMA journal_mode = WAL;'); } catch {}
-  db.exec('PRAGMA foreign_keys = ON;');
-  db.exec('PRAGMA synchronous = NORMAL;');      // safe with WAL, much faster writes
-  db.exec('PRAGMA busy_timeout = 5000;');
-  // Dates are stored as 'YYYY-MM-DD'; case-sensitive LIKE lets "LIKE '2026-10%'"
-  // month filters use the date index. (No text search in the app relies on LIKE.)
-  db.exec('PRAGMA case_sensitive_like = ON;');
-
-  db.exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  full_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('driver','admin')),
-  username TEXT UNIQUE,
-  password_hash TEXT,
-  pin_hash TEXT,
-  phone TEXT,
-  vehicle_id INTEGER,
-  is_active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS vehicles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  fleet_number TEXT UNIQUE NOT NULL,
-  plate TEXT NOT NULL,
-  max_daily_capacity INTEGER NOT NULL DEFAULT 15,
-  zone TEXT NOT NULL,
-  is_active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS customers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  branch TEXT,
-  zone TEXT NOT NULL,
-  frequency INTEGER NOT NULL DEFAULT 2 CHECK (frequency IN (2,3)),
-  lat REAL NOT NULL,
-  lng REAL NOT NULL,
-  address TEXT,
-  contact_phone TEXT,
-  is_active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS pickups (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  customer_id INTEGER NOT NULL REFERENCES customers(id),
-  vehicle_id INTEGER REFERENCES vehicles(id),
-  driver_id INTEGER REFERENCES users(id),
-  scheduled_date TEXT NOT NULL,
-  seq INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','collected','canceled','overdue','rescheduled')),
-  completed_at TEXT,
-  photo_url TEXT,
-  gps_lat REAL, gps_lng REAL,
-  anomaly_reason TEXT,
-  stage TEXT,
-  notes TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_pickups_date ON pickups(scheduled_date);
-CREATE INDEX IF NOT EXISTS idx_pickups_status ON pickups(status);
-CREATE TABLE IF NOT EXISTS alerts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  type TEXT NOT NULL,
-  severity TEXT NOT NULL DEFAULT 'info',
-  message TEXT NOT NULL,
-  pickup_id INTEGER,
-  is_read INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`);
-  try { db.exec('ALTER TABLE pickups ADD COLUMN stage TEXT'); } catch {}
-
-  // Indexes for the lookups the busy screens make (load test: customers list 13× faster).
-  for (const sql of [
-    'CREATE INDEX IF NOT EXISTS ix_pickups_customer_date ON pickups(customer_id, scheduled_date)',
-    'CREATE INDEX IF NOT EXISTS ix_pickups_driver_date ON pickups(driver_id, scheduled_date)',
-    'CREATE INDEX IF NOT EXISTS ix_pickups_vehicle_date ON pickups(vehicle_id, scheduled_date)',
-    'CREATE INDEX IF NOT EXISTS ix_pickups_completed ON pickups(completed_at)',
-    'CREATE INDEX IF NOT EXISTS ix_pickups_date_status ON pickups(scheduled_date, status)',
-  ]) { try { db.exec(sql); } catch {} }
-
-  // Prepared statements are cached by SQL text (most queries run many times a minute).
-  const stmts = new Map();
-  const prep = (sql) => {
-    let st = stmts.get(sql);
-    if (!st) { st = db.prepare(sql); if (stmts.size < 2000) stmts.set(sql, st); }
-    return st;
-  };
-  const q = {
-    all: (sql, ...p) => prep(sql).all(...p),
-    get: (sql, ...p) => prep(sql).get(...p),
-    run: (sql, ...p) => {
-      try { return prep(sql).run(...p); }
-      catch (e) {
-        /* "ADD COLUMN" migrations run on every start; after the first start the
-           column already exists. Treat that as done instead of crashing. */
-        if (/duplicate column name/i.test(e.message) && /^\s*ALTER\s+TABLE/i.test(sql)) return { changes: 0 };
-        throw e;
-      }
-    },
-  };
-
-  function getSetting(key, fallback) {
-    const r = q.get('SELECT value FROM settings WHERE key = ?', key);
-    return r ? r.value : fallback;
+/**
+ * Manual JOIN. MongoDB has no SQL JOIN, so we load the related documents in
+ * ONE extra query (`id IN [...]`) and copy the fields we need onto each row.
+ *
+ *   rows = await join(rows, 'customer_id', 'customer', ['name', 'branch', 'zone']);
+ *   rows = await join(rows, 'vehicle_id', 'vehicle', { fleet_number: 'fleet_number' });
+ *
+ * fields: array (same names) or { outputName: 'fieldInRelatedDoc' }.
+ * opts.inner = true drops rows with no match (SQL "JOIN"); default keeps them
+ * with nulls (SQL "LEFT JOIN").
+ */
+async function join(rows, fk, delegate, fields, opts = {}) {
+  const map = Array.isArray(fields) ? Object.fromEntries(fields.map(f => [f, f])) : fields;
+  const ids = [...new Set(rows.map(r => r[fk]).filter(v => v != null))];
+  const key = opts.key || 'id';
+  const related = ids.length
+    ? await prisma[delegate].findMany({ where: { [key]: { in: ids } }, select: { [key]: true, ...Object.fromEntries(Object.values(map).map(f => [f, true])) } })
+    : [];
+  const byKey = new Map(related.map(d => [d[key], d]));
+  const out = [];
+  for (const r of rows) {
+    const d = byKey.get(r[fk]);
+    if (!d && opts.inner) continue;
+    for (const [as, f] of Object.entries(map)) r[as] = d ? d[f] ?? null : null;
+    out.push(r);
   }
-  function setSetting(key, value) {
-    q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', key, String(value));
-  }
-
-  function seed() {
-    if (q.get('SELECT id FROM users LIMIT 1')) return false;
-    setSetting('shift_cutoff', '12:00');
-    setSetting('company_name', 'Majari / GreenLoop');
-    q.run(`INSERT INTO vehicles(fleet_number,plate,max_daily_capacity,zone) VALUES
-      ('TRUCK-01','DXB A 71214',15,'Deira'),
-      ('TRUCK-02','DXB B 33482',15,'Marina')`);
-    const admin = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10);
-    q.run(`INSERT INTO users(full_name,role,username,password_hash,phone) VALUES
-      ('Shahzad (Owner)','admin','admin','${admin}','+971500000001')`);
-    const pins = { 'Ali Hassan': ['1111', 1], 'Ramesh Kumar': ['2222', 2], 'Joseph Mathew': ['3333', null] };
-    for (const [name, [pin, veh]] of Object.entries(pins)) {
-      q.run('INSERT INTO users(full_name,role,pin_hash,vehicle_id,phone) VALUES (?,?,?,?,?)',
-        name, 'driver', bcrypt.hashSync(pin, 10), veh, '+9715' + Math.floor(10000000 + Math.random() * 89999999));
-    }
-    const zones = {
-      Deira: { lat: 25.2697, lng: 55.3094 },
-      Marina: { lat: 25.0805, lng: 55.1403 },
-      Downtown: { lat: 25.1972, lng: 55.2744 },
-    };
-    const brands = ['Al Madina Mart', 'Fresh Basket', 'City Grocer', 'Lulu Express', 'Nesto Mini', 'Day2Day',
-      'Green Valley', 'Star Supermarket', 'Al Noor Foods', 'Sunrise Mart', 'Family Choice', 'Quick Stop'];
-    const ins = db.prepare('INSERT INTO customers(name,branch,zone,frequency,lat,lng,address,contact_phone) VALUES (?,?,?,?,?,?,?,?)');
-    let n = 0;
-    for (const [zone, c] of Object.entries(zones)) {
-      for (let i = 0; i < 12; i++) {
-        const brand = brands[(n + i) % brands.length];
-        ins.run(`${brand}`, `${zone} Branch ${i + 1}`, zone, (i % 3 === 0) ? 3 : 2,
-          c.lat + (Math.random() - 0.5) * 0.05, c.lng + (Math.random() - 0.5) * 0.05,
-          `${zone}, Street ${10 + i}, Dubai`, '+9714' + Math.floor(1000000 + Math.random() * 8999999));
-      }
-      n++;
-    }
-    return true;
-  }
-
-  module.exports = { db, q, seed, getSetting, setSetting, isPg: false };
+  return out;
 }
+
+/** Keep only these keys (like a SQL column list) — handy after a join. */
+const pick = (row, keys) => Object.fromEntries(keys.map(k => [k, row[k] ?? null]));
+
+/** Group an array by a key function → Map key → rows[] (like SQL GROUP BY). */
+function groupBy(rows, keyFn) {
+  const m = new Map();
+  for (const r of rows) { const k = keyFn(r); if (!m.has(k)) m.set(k, []); m.get(k).push(r); }
+  return m;
+}
+
+/** Count rows per status → { collected, canceled, overdue, pending } (SUM(status='x')). */
+function statusCounts(rows, statuses = ['collected', 'canceled', 'overdue', 'pending']) {
+  const out = Object.fromEntries(statuses.map(s => [s, 0]));
+  for (const r of rows) if (r.status in out) out[r.status]++;
+  return out;
+}
+
+/** Compare like SQL ORDER BY: nulls first, then plain (binary) order. Use in Array.sort. */
+const cmp = (a, b) => (a == null ? (b == null ? 0 : -1) : b == null ? 1 : a < b ? -1 : a > b ? 1 : 0);
+/** Sort by several keys: sortBy(rows, r => r.zone, r => r.name) — prefix a key with '-' via desc(). */
+const desc = (fn) => Object.assign((r) => fn(r), { desc: true });
+function sortBy(rows, ...keys) {
+  return rows.sort((a, b) => { for (const k of keys) { const c = cmp(k(a), k(b)); if (c) return k.desc ? -c : c; } return 0; });
+}
+
+/** A URL/body id → Int, or null if it isn't a valid id (Prisma rejects "12" strings for Int fields). */
+const toId = (v) => { const n = Number(v); return v !== '' && v != null && Number.isInteger(n) && n > 0 && n <= 2147483647 ? n : null; };
+/** A number for a Float field, or null (SQLite stored NaN as NULL; Prisma would reject NaN). */
+const num = (v) => { if (v === '' || v == null) return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
+/** A whole number for an Int field, or `fallback`. */
+const int = (v, fallback = null) => { const n = Number(v); return v !== '' && v != null && Number.isInteger(n) && Math.abs(n) <= 2147483647 ? n : fallback; };
+/** A text value for a String field (numbers become text), null stays null. */
+const str = (v) => (v == null ? null : String(v));
+
+/** findUnique by id that simply returns null for a bad id like "abc". */
+async function findById(delegate, rawId, args = {}) {
+  const id = toId(rawId);
+  return id == null ? null : prisma[delegate].findUnique({ where: { id }, ...args });
+}
+
+/** First run only: demo trucks, drivers, admin and 36 supermarket customers. */
+async function seed() {
+  if (await prisma.user.findFirst({ select: { id: true } })) return false;
+  await P.setSetting('shift_cutoff', '12:00');
+  await P.setSetting('company_name', 'Majari / GreenLoop');
+  await prisma.vehicle.createMany({
+    data: [
+      { fleet_number: 'TRUCK-01', plate: 'DXB A 71214', max_daily_capacity: 15, zone: 'Deira' },
+      { fleet_number: 'TRUCK-02', plate: 'DXB B 33482', max_daily_capacity: 15, zone: 'Marina' },
+    ],
+  });
+  await prisma.user.create({
+    data: {
+      full_name: 'Shahzad (Owner)', role: 'admin', username: 'admin',
+      password_hash: bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10), phone: '+971500000001',
+    },
+  });
+  const pins = { 'Ali Hassan': ['1111', 1], 'Ramesh Kumar': ['2222', 2], 'Joseph Mathew': ['3333', null] };
+  for (const [name, [pin, veh]] of Object.entries(pins)) {
+    await prisma.user.create({
+      data: {
+        full_name: name, role: 'driver', pin_hash: bcrypt.hashSync(pin, 10), vehicle_id: veh,
+        phone: '+9715' + Math.floor(10000000 + Math.random() * 89999999),
+      },
+    });
+  }
+  const zones = {
+    Deira: { lat: 25.2697, lng: 55.3094 },
+    Marina: { lat: 25.0805, lng: 55.1403 },
+    Downtown: { lat: 25.1972, lng: 55.2744 },
+  };
+  const brands = ['Al Madina Mart', 'Fresh Basket', 'City Grocer', 'Lulu Express', 'Nesto Mini', 'Day2Day',
+    'Green Valley', 'Star Supermarket', 'Al Noor Foods', 'Sunrise Mart', 'Family Choice', 'Quick Stop'];
+  const customers = [];
+  let n = 0;
+  for (const [zone, c] of Object.entries(zones)) {
+    for (let i = 0; i < 12; i++) {
+      customers.push({
+        name: brands[(n + i) % brands.length], branch: `${zone} Branch ${i + 1}`, zone, frequency: (i % 3 === 0) ? 3 : 2,
+        lat: c.lat + (Math.random() - 0.5) * 0.05, lng: c.lng + (Math.random() - 0.5) * 0.05,
+        address: `${zone}, Street ${10 + i}, Dubai`, contact_phone: '+9714' + Math.floor(1000000 + Math.random() * 8999999),
+      });
+    }
+    n++;
+  }
+  await prisma.customer.createMany({ data: customers });
+  return true;
+}
+
+module.exports = { ...P, join, pick, groupBy, statusCounts, toId, num, int, str, findById, cmp, desc, sortBy, seed };

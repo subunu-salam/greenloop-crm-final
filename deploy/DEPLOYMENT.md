@@ -61,7 +61,7 @@ Open `https://ops.yourcompany.ae/driver` in the phone browser → menu → **Add
 | View logs | `docker compose -f docker-compose.prod.yml logs -f app` |
 | Restart | `docker compose -f docker-compose.prod.yml restart` |
 | Update code | upload new files, then restart |
-| Backup | copy the `appdata` volume: `docker run --rm -v deploy_appdata:/d -v $(pwd):/b alpine cp /d/greenloop.sqlite /b/backup-$(date +%F).sqlite` |
+| Backup | `docker compose -f docker-compose.prod.yml exec mongo mongodump --archive --gzip --db greenloop > backup-$(date +%F).gz` (the app also writes a daily JSON copy to `/data/backups`) |
 
 Schedule the backup command in cron (e.g. daily at 02:00) and keep copies off the server.
 

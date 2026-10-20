@@ -1,8 +1,8 @@
-// End-to-end smoke test — boots the server in-process and exercises every flow.
-// Run: node test/e2e.js
+// End-to-end smoke test — boots the real server against a real MongoDB and exercises every flow.
+// Run: npm run test:e2e   (needs MongoDB running; uses the database "greenloop_e2e", emptied first)
 process.env.PORT = process.env.PORT || '3123';
-process.env.DB_PATH = process.env.DB_PATH || require('os').tmpdir() + '/gl_e2e_' + Date.now() + '.sqlite';
-require('../server/index.js');
+process.env.DATABASE_URL = process.env.E2E_DATABASE_URL || 'mongodb://127.0.0.1:27017/greenloop_e2e?replicaSet=rs0&directConnection=true';
+const { base, MODELS, prisma } = require('../server/prisma');
 
 const BASE = `http://localhost:${process.env.PORT}/api/v1`;
 let pass = 0, fail = 0;
@@ -15,7 +15,9 @@ const j = (r) => r.json();
 const auth = t => ({ Authorization: 'Bearer ' + t });
 
 (async () => {
-  await new Promise(r => setTimeout(r, 800));
+  for (const m of Object.values(MODELS)) await base[m.delegate].deleteMany({});   // fresh database
+  require('../server/index.js');
+  await new Promise(r => setTimeout(r, 2500));                                    // boot: seed + schedule
 
   // 1. Auth
   const bad = await fetch(BASE + '/auth/admin-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'wrong' }) });
@@ -82,12 +84,13 @@ const auth = t => ({ Authorization: 'Bearer ' + t });
   const next = new Date(); next.setMonth(next.getMonth() + 1);
   const gen = await j(await fetch(BASE + '/schedule/generate', { method: 'POST', headers: { ...auth(admin.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ year: next.getFullYear(), month: next.getMonth() + 1 }) }));
   ok('next month generated with 3 trucks', gen.created > 0, `${gen.created} pickups`);
-  const { q } = require('../server/db');
   const nm = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`;
-  const t3 = q.get(`SELECT COUNT(*) c FROM pickups p JOIN vehicles v ON v.id=p.vehicle_id WHERE v.fleet_number='TRUCK-03' AND p.scheduled_date LIKE ?`, nm + '%').c;
+  const truck3 = await prisma.vehicle.findUnique({ where: { fleet_number: 'TRUCK-03' } });
+  const t3 = await prisma.pickup.count({ where: { vehicle_id: truck3.id, scheduled_date: { startsWith: nm } } });
   ok('TRUCK-03 absorbed its zone', t3 > 0, `${t3} Downtown stops assigned`);
-  const gaps = q.all(`SELECT customer_id, GROUP_CONCAT(scheduled_date) ds FROM pickups WHERE scheduled_date LIKE ? AND status='pending' GROUP BY customer_id`, nm + '%');
-  const gapOk = gaps.every(g => { const ds = g.ds.split(',').sort().map(x => new Date(x)); return ds.every((d, i) => !i || (d - ds[i - 1]) / 864e5 >= 8 && (d - ds[i - 1]) / 864e5 <= 12); });
+  const monthJobs = await prisma.pickup.findMany({ where: { scheduled_date: { startsWith: nm }, status: 'pending' }, select: { customer_id: true, scheduled_date: true } });
+  const byCustomer = new Map(); monthJobs.forEach(p => byCustomer.set(p.customer_id, [...(byCustomer.get(p.customer_id) || []), p.scheduled_date]));
+  const gapOk = [...byCustomer.values()].every(list => { const ds = list.sort().map(x => new Date(x)); return ds.every((d, i) => !i || (d - ds[i - 1]) / 864e5 >= 8 && (d - ds[i - 1]) / 864e5 <= 12); });
   ok('8–12 day visit gaps respected', gapOk);
 
   // 9. SLA breach flow (set cutoff to now → pending flips to overdue)

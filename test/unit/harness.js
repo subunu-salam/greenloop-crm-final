@@ -1,16 +1,22 @@
 const Module = require('module');
 const path = require('path');
-// Runs the real server modules against a throwaway SQLite file. Express, JWT,
-// bcrypt, multer and web-push are replaced by tiny stand-ins so the suite
-// needs no npm install and no network (handy in CI).
+// Runs the real server modules against an in-memory stand-in for Prisma
+// (test/fake-prisma.js — it follows prisma/schema.prisma and MongoDB's rules).
+// Express, JWT, bcrypt, multer and web-push are replaced by tiny stand-ins too,
+// so the suite needs no npm install, no MongoDB and no network (handy in CI).
+// Each test file starts with `await ready` (the demo data is seeded asynchronously).
+//
+// TEST_MONGO=1 runs the same tests against a REAL MongoDB instead (npm run test:mongo):
+// the database in TEST_DATABASE_URL is emptied at the start of every suite.
 const os = require('os');
 const TMP = require('fs').mkdtempSync(path.join(os.tmpdir(), 'greenloop-test-'));
-process.env.DB_PATH = path.join(TMP, 'test.sqlite');
 process.env.DATA_DIR = TMP;
 process.env.JWT_SECRET = 'test-secret-test-secret-test-secret';
 process.env.UPLOAD_DIR = path.join(TMP, 'uploads');
-require('fs').rmSync(process.env.DB_PATH, { force: true });
+const REAL_DB = process.env.TEST_MONGO === '1';
+if (REAL_DB) process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'mongodb://127.0.0.1:27017/greenloop_test?replicaSet=rs0';
 const stubs = {
+  ...(REAL_DB ? {} : { '@prisma/client': require('../fake-prisma') }),
   jsonwebtoken: { sign: (p) => 'T.' + Buffer.from(JSON.stringify(p)).toString('base64'), verify: (t) => { if (!t.startsWith('T.')) throw new Error('bad'); return JSON.parse(Buffer.from(t.slice(2), 'base64').toString()); } },
   bcryptjs: { hashSync: x => 'h:' + x, compareSync: (a, h) => h === 'h:' + a },
   multer: Object.assign(() => ({ single: () => (req, res, next) => next(), fields: () => (req, res, next) => next() }), { diskStorage: () => ({}) }),
@@ -27,7 +33,7 @@ const orig = Module._load;
 Module._load = function (req, ...a) { if (stubs[req]) return stubs[req]; return orig.call(this, req, ...a); };
 const SRV = path.join(__dirname, '..', '..', 'server') + path.sep;
 const db = require(SRV + 'db');
-db.seed();
+const { prisma } = db;
 const emitted = [];
 const io = { emit: (e, d) => emitted.push(e), to: (room) => ({ emit: (e, d) => emitted.push(room + '|' + e) }) };
 const router = require(SRV + 'api')(io);
@@ -62,4 +68,12 @@ async function call(m, url, { token, body, file, files, pre = [], ip = '10.0.0.1
     next();
   });
 }
-module.exports = { call, tok, db, v3, emitted, webpush: stubs['web-push'] };
+// the same first-run steps server/index.js performs at boot
+const ready = (async () => {
+  if (REAL_DB) for (const m of Object.values(db.MODELS)) await db.base[m.delegate].deleteMany({});   // fresh database per suite
+  await db.seed();
+  await v3.init();
+  await require(SRV + 'growth').init();
+  await require(SRV + 'customer-api').seedPortalCodes();
+})();
+module.exports = { call, tok, db, prisma, v3, emitted, ready, webpush: stubs['web-push'] };

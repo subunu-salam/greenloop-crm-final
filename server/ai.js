@@ -1,49 +1,34 @@
 // GreenLoop AI helpers — rule-based always; optional OpenAI when OPENAI_API_KEY is set
-const { q } = require('./db');
+const { prisma, join, groupBy, statusCounts, sortBy, desc } = require('./db');
 
 async function buildOpsBrief() {
   const today = new Date().toISOString().slice(0, 10);
   const month = today.slice(0, 7);
 
-  const totals = q.get(
-    `SELECT COUNT(*) total,
-      SUM(status='pending') pending,
-      SUM(status='collected') collected,
-      SUM(status='canceled') canceled,
-      SUM(status='overdue') overdue
-     FROM pickups WHERE scheduled_date=? AND status!='rescheduled'`,
-    today
-  ) || {};
+  const todays = await prisma.pickup.findMany({
+    where: { scheduled_date: today, status: { not: 'rescheduled' } },
+    select: { id: true, status: true, stage: true, seq: true, customer_id: true, driver_id: true, vehicle_id: true },
+  });
+  // COUNT(*) + SUM(status='x') — SUM over no rows is NULL in SQL, kept for the same output
+  const c0 = statusCounts(todays);
+  const totals = todays.length ? { total: todays.length, ...c0 } : { total: 0, pending: null, collected: null, canceled: null, overdue: null };
 
-  const late = q.all(
-    `SELECT c.name, c.branch, c.zone, p.status, p.stage, p.id
-     FROM pickups p JOIN customers c ON c.id=p.customer_id
-     WHERE p.scheduled_date=? AND p.status IN ('pending','overdue')
-     ORDER BY p.status='overdue' DESC, p.seq LIMIT 15`,
-    today
-  );
+  let late = await join(todays.filter(p => ['pending', 'overdue'].includes(p.status)), 'customer_id', 'customer', ['name', 'branch', 'zone'], { inner: true });
+  late = sortBy(late, desc(p => (p.status === 'overdue' ? 1 : 0)), p => p.seq, p => p.id).slice(0, 15)
+    .map(p => ({ name: p.name, branch: p.branch, zone: p.zone, status: p.status, stage: p.stage, id: p.id }));
 
-  const topCancel = q.all(
-    `SELECT c.name, c.branch, c.zone, p.anomaly_reason, COUNT(*) n
-     FROM pickups p JOIN customers c ON c.id=p.customer_id
-     WHERE p.scheduled_date LIKE ? AND p.status='canceled'
-     GROUP BY c.id, p.anomaly_reason
-     ORDER BY n DESC LIMIT 8`,
-    month + '%'
-  );
+  const monthCancels = await join(
+    await prisma.pickup.findMany({ where: { scheduled_date: { startsWith: month }, status: 'canceled' }, select: { customer_id: true, anomaly_reason: true } }),
+    'customer_id', 'customer', ['name', 'branch', 'zone'], { inner: true });
+  const topCancel = [...groupBy(monthCancels, p => p.customer_id + '|' + p.anomaly_reason)]   // GROUP BY customer, reason
+    .map(([, list]) => ({ name: list[0].name, branch: list[0].branch, zone: list[0].zone, anomaly_reason: list[0].anomaly_reason, n: list.length }))
+    .sort((a, b) => b.n - a.n).slice(0, 8);
 
-  const drivers = q.all(
-    `SELECT u.full_name, v.fleet_number,
-      SUM(p.status='collected') collected,
-      SUM(p.status='pending') pending,
-      SUM(p.status='canceled') canceled
-     FROM pickups p
-     JOIN users u ON u.id=p.driver_id
-     LEFT JOIN vehicles v ON v.id=p.vehicle_id
-     WHERE p.scheduled_date=?
-     GROUP BY u.id ORDER BY pending DESC`,
-    today
-  );
+  let withDriver = await join(todays.map(p => ({ ...p })), 'driver_id', 'user', ['full_name'], { inner: true });
+  withDriver = await join(withDriver, 'vehicle_id', 'vehicle', ['fleet_number']);
+  const drivers = [...groupBy(withDriver, p => p.driver_id)]
+    .map(([, list]) => { const c = statusCounts(list); return { full_name: list[0].full_name, fleet_number: list[0].fleet_number, collected: c.collected, pending: c.pending, canceled: c.canceled }; })
+    .sort((a, b) => b.pending - a.pending);
 
   const rate =
     totals.collected + totals.canceled + totals.overdue > 0
@@ -158,15 +143,15 @@ async function llmNarrative(brief) {
   return data.choices?.[0]?.message?.content?.trim() || null;
 }
 
-function customerRiskHints(customerId) {
+async function customerRiskHints(customerId) {
   const month = new Date().toISOString().slice(0, 7);
-  const rows = q.all(
-    `SELECT anomaly_reason, COUNT(*) n FROM pickups
-     WHERE customer_id=? AND scheduled_date LIKE ? AND anomaly_reason IS NOT NULL
-     GROUP BY anomaly_reason ORDER BY n DESC`,
-    customerId,
-    month + '%'
-  );
+  if (!Number.isInteger(customerId)) return [];
+  const g = await prisma.pickup.groupBy({
+    by: ['anomaly_reason'],
+    where: { customer_id: customerId, scheduled_date: { startsWith: month }, anomaly_reason: { not: null } },
+    _count: { _all: true },
+  });
+  const rows = g.map((x) => ({ anomaly_reason: x.anomaly_reason, n: x._count._all })).sort((a, b) => b.n - a.n);
   return rows.map((r) => ({
     reason: r.anomaly_reason,
     count: r.n,

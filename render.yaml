@@ -1,24 +1,29 @@
-# GreenLoop on Render - single web service, SQLite on a persistent disk
-# (v3 features require SQLite; do NOT set DATABASE_URL)
+# GreenLoop on Render — one web service + MongoDB Atlas (free M0 cluster is enough to start)
+# 1. Create an Atlas cluster, a database user, and allow Render's IPs (Network Access).
+# 2. In the Render dashboard set DATABASE_URL to the Atlas connection string
+#    (mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/greenloop?retryWrites=true&w=majority).
+# Atlas clusters are replica sets already, which Prisma needs.
 services:
   - type: web
     name: greenloop
     runtime: node
     plan: starter
-    buildCommand: npm install
+    # npm install also runs "prisma generate"; db:setup creates indexes in Atlas (safe to repeat)
+    buildCommand: npm install && npm run db:setup
     startCommand: node server/index.js
     healthCheckPath: /crm/
     disk:
+      # photos/receipts and the generated VAPID keys still live on disk
       name: greenloop-data
       mountPath: /var/data
       sizeGB: 1
     envVars:
       - key: NODE_VERSION
-        value: "24"
+        value: "22"
+      - key: DATABASE_URL
+        sync: false
       - key: JWT_SECRET
         generateValue: true
-      - key: DB_PATH
-        value: /var/data/greenloop.sqlite
       - key: UPLOAD_DIR
         value: /var/data/uploads
       - key: DATA_DIR

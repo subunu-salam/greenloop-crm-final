@@ -29,9 +29,9 @@ function mountAiRoutes(r) {
     }
   });
 
-  r.get('/ai/customer-risk/:id', authAdmin, (req, res) => {
+  r.get('/ai/customer-risk/:id', authAdmin, async (req, res) => {
     try {
-      res.json({ customer_id: Number(req.params.id), risks: customerRiskHints(Number(req.params.id)) });
+      res.json({ customer_id: Number(req.params.id), risks: await customerRiskHints(Number(req.params.id)) });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -41,7 +41,7 @@ function mountAiRoutes(r) {
 // v3.5: AI insights. ?source=auto (default: your data when there is enough of it, else demo) | live | demo
 const src = req => (['live', 'demo'].includes(req.query.source) ? req.query.source : 'auto');
 function mountInsightRoutes(r) {
-  const run = fn => (req, res) => { try { res.json(fn(req)); } catch (e) { console.error('insights:', e); res.status(500).json({ error: 'Could not build the insights: ' + e.message }); } };
+  const run = fn => async (req, res) => { try { res.json(await fn(req)); } catch (e) { console.error('insights:', e); res.status(500).json({ error: 'Could not build the insights: ' + e.message }); } };
   r.get('/ai/insights', authAdmin, run(req => insights.overview(src(req))));
   r.get('/ai/reports/daily', authAdmin, run(req => insights.dailyReport(src(req), req.query.date)));
   r.get('/ai/reports/weekly', authAdmin, run(req => insights.weeklyReport(src(req), req.query.end)));

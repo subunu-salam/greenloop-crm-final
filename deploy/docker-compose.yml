@@ -1,15 +1,20 @@
-# Production deployment: app + PostgreSQL
-# Usage: docker compose up -d   (run from the deploy/ folder)
+# GreenLoop + MongoDB (single-node replica set) with Docker
+# Usage (from the deploy/ folder):  docker compose up -d
+# Open http://localhost  ·  MongoDB Compass: mongodb://localhost:27017/?replicaSet=rs0&directConnection=true
 services:
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: greenloop
-      POSTGRES_USER: greenloop
-      POSTGRES_PASSWORD: change-me
+  mongo:
+    image: mongo:7
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./schema.postgres.sql:/docker-entrypoint-initdb.d/schema.sql
+      - mongodata:/data/db
+    healthcheck:
+      # turns the server into a replica set the first time (Prisma needs one), then reports healthy
+      test: mongosh --quiet --eval "try { rs.status().ok } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }).ok }"
+      interval: 5s
+      timeout: 10s
+      retries: 20
     restart: unless-stopped
 
   app:
@@ -17,16 +22,17 @@ services:
     working_dir: /app
     volumes:
       - ..:/app
-    command: sh -c "npm install --omit=dev && node server/index.js"
+    command: sh -c "npm install --omit=dev && npm run db:setup && node server/index.js"
     environment:
       PORT: 3000
+      DATABASE_URL: mongodb://mongo:27017/greenloop?replicaSet=rs0
       JWT_SECRET: generate-a-long-random-secret
-      # For Postgres mode, swap the db layer per README (SQLite is default)
     ports:
       - "80:3000"
     depends_on:
-      - db
+      mongo:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  pgdata:
+  mongodata:

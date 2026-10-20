@@ -6,12 +6,13 @@
 //   4. Top-3 ranking    — lowest added mileage first
 //   5. One-click apply  — moves the stop, re-sorts routes, notifies driver
 // ─────────────────────────────────────────────────────────────
-const { q } = require('../db');
+const { prisma, now } = require('../db');
 const { insertionCost } = require('./geo');
 const { resortDay } = require('./scheduler');
 const { capacityFor } = require('../capacity');
 
 const HORIZON_DAYS = 7;
+const ACTIVE_LOAD = ['pending', 'collected', 'overdue'];
 
 function addDays(dateStr, n) {
   const d = new Date(dateStr + 'T00:00:00Z');
@@ -19,16 +20,17 @@ function addDays(dateStr, n) {
   return d.toISOString().slice(0, 10);
 }
 
-function recommend(pickupId) {
-  const pickup = q.get(
-    `SELECT p.*, c.zone, c.lat, c.lng, c.name AS customer_name, c.branch
-     FROM pickups p JOIN customers c ON c.id = p.customer_id WHERE p.id = ?`, pickupId);
-  if (!pickup) return { error: 'Pickup not found' };
+async function recommend(pickupId) {
+  if (!Number.isInteger(pickupId)) return { error: 'Pickup not found' };
+  const p = await prisma.pickup.findUnique({ where: { id: pickupId } });
+  const cust = p ? await prisma.customer.findUnique({ where: { id: p.customer_id } }) : null;
+  if (!p || !cust) return { error: 'Pickup not found' };
+  const pickup = { ...p, zone: cust.zone, lat: cust.lat, lng: cust.lng, customer_name: cust.name, branch: cust.branch };
 
   // Step 1 — zone filtering
-  let vehicles = q.all(`SELECT * FROM vehicles WHERE is_active = 1 AND zone = ?`, pickup.zone);
+  let vehicles = await prisma.vehicle.findMany({ where: { is_active: 1, zone: pickup.zone }, orderBy: { id: 'asc' } });
   let zoneRelaxed = false;
-  if (!vehicles.length) { vehicles = q.all(`SELECT * FROM vehicles WHERE is_active = 1`); zoneRelaxed = true; }
+  if (!vehicles.length) { vehicles = await prisma.vehicle.findMany({ where: { is_active: 1 }, orderBy: { id: 'asc' } }); zoneRelaxed = true; }
 
   const today = new Date().toISOString().slice(0, 10);
   const startFrom = pickup.scheduled_date > today ? pickup.scheduled_date : today;
@@ -38,24 +40,25 @@ function recommend(pickupId) {
     const date = addDays(startFrom, i);
     for (const v of vehicles) {
       // Step 2 — capacity threshold analysis
-      const dayLoad = q.get(
-        `SELECT COUNT(*) c FROM pickups
-         WHERE vehicle_id = ? AND scheduled_date = ? AND status IN ('pending','collected','overdue')`,
-        v.id, date).c;
-      const dayCap = capacityFor(v, date);
+      const dayLoad = await prisma.pickup.count({ where: { vehicle_id: v.id, scheduled_date: date, status: { in: ACTIVE_LOAD } } });
+      const dayCap = await capacityFor(v, date);
       if (dayLoad >= dayCap) continue;
 
       // avoid same-day duplicate visit for this customer
-      const dup = q.get(
-        `SELECT id FROM pickups WHERE customer_id = ? AND scheduled_date = ? AND status IN ('pending','collected')`,
-        pickup.customer_id, date);
+      const dup = await prisma.pickup.findFirst({
+        where: { customer_id: pickup.customer_id, scheduled_date: date, status: { in: ['pending', 'collected'] } },
+        select: { id: true },
+      });
       if (dup) continue;
 
       // Step 3 — proximity distance deviation (cheapest insertion into that day's route)
-      const route = q.all(
-        `SELECT c.lat, c.lng FROM pickups p JOIN customers c ON c.id = p.customer_id
-         WHERE p.vehicle_id = ? AND p.scheduled_date = ? AND p.status IN ('pending','collected','overdue')
-         ORDER BY p.seq`, v.id, date);
+      const stops = await prisma.pickup.findMany({
+        where: { vehicle_id: v.id, scheduled_date: date, status: { in: ACTIVE_LOAD } },
+        select: { customer_id: true }, orderBy: [{ seq: 'asc' }, { id: 'asc' }],
+      });
+      const pts = await prisma.customer.findMany({ where: { id: { in: stops.map(s => s.customer_id) } }, select: { id: true, lat: true, lng: true } });
+      const at = new Map(pts.map(c => [c.id, c]));
+      const route = stops.map(s => at.get(s.customer_id)).filter(Boolean);
       const deviationKm = insertionCost(route, { lat: pickup.lat, lng: pickup.lng });
 
       options.push({
@@ -80,31 +83,38 @@ function recommend(pickupId) {
 }
 
 // Step 5 — one-click dispatch
-function apply(pickupId, date, vehicleId) {
-  const pickup = q.get(`SELECT * FROM pickups WHERE id = ?`, pickupId);
+async function apply(pickupId, date, vehicleId) {
+  const pickup = Number.isInteger(pickupId) ? await prisma.pickup.findUnique({ where: { id: pickupId } }) : null;
   if (!pickup) return { error: 'Pickup not found' };
-  const vehicle = q.get(`SELECT * FROM vehicles WHERE id = ?`, vehicleId);
+  const vehicle = Number.isInteger(vehicleId) ? await prisma.vehicle.findUnique({ where: { id: vehicleId } }) : null;
   if (!vehicle) return { error: 'Vehicle not found' };
-  const dayLoad = q.get(
-    `SELECT COUNT(*) c FROM pickups WHERE vehicle_id = ? AND scheduled_date = ? AND status IN ('pending','collected','overdue')`,
-    vehicleId, date).c;
-  const dayCap = capacityFor(vehicle, date);
+  const dayLoad = await prisma.pickup.count({ where: { vehicle_id: vehicleId, scheduled_date: date, status: { in: ACTIVE_LOAD } } });
+  const dayCap = await capacityFor(vehicle, date);
   if (dayLoad >= dayCap)
     return { error: `Conflict: ${vehicle.fleet_number} already at capacity (${dayCap}) on ${date}` };
 
-  const driver = q.get(`SELECT id FROM users WHERE role='driver' AND vehicle_id = ? AND is_active = 1`, vehicleId);
+  const driver = await prisma.user.findFirst({ where: { role: 'driver', vehicle_id: vehicleId, is_active: 1 }, select: { id: true }, orderBy: { id: 'asc' } });
 
-  // keep the original row as an audit trail, create the new stop
-  q.run(`UPDATE pickups SET status = 'rescheduled', notes = COALESCE(notes,'') || ' → moved to ' || ?, updated_at = datetime('now') WHERE id = ?`,
-    date, pickupId);
-  q.run(`INSERT INTO pickups(customer_id, vehicle_id, driver_id, scheduled_date, status, notes)
-         VALUES (?,?,?,?, 'pending', 'Rescheduled from ' || ?)`,
-    pickup.customer_id, vehicleId, driver ? driver.id : null, date, pickup.scheduled_date);
-  resortDay(date);
+  // keep the original document as an audit trail, create the new stop
+  await prisma.pickup.update({
+    where: { id: pickupId },
+    data: { status: 'rescheduled', notes: (pickup.notes || '') + ' → moved to ' + date, updated_at: now() },
+  });
+  await prisma.pickup.create({
+    data: {
+      customer_id: pickup.customer_id, vehicle_id: vehicleId, driver_id: driver ? driver.id : null,
+      scheduled_date: date, status: 'pending', notes: 'Rescheduled from ' + pickup.scheduled_date,
+    },
+  });
+  await resortDay(date);
 
-  const cust = q.get(`SELECT name, branch FROM customers WHERE id = ?`, pickup.customer_id);
-  q.run(`INSERT INTO alerts(type, severity, message, pickup_id) VALUES ('RESCHEDULED','info',?,?)`,
-    `${cust.name} (${cust.branch}) moved ${pickup.scheduled_date} → ${date} on ${vehicle.fleet_number}`, pickupId);
+  const cust = await prisma.customer.findUnique({ where: { id: pickup.customer_id }, select: { name: true, branch: true } });
+  await prisma.alert.create({
+    data: {
+      type: 'RESCHEDULED', severity: 'info', pickup_id: pickupId,
+      message: `${cust.name} (${cust.branch}) moved ${pickup.scheduled_date} → ${date} on ${vehicle.fleet_number}`,
+    },
+  });
 
   return { ok: true, new_date: date, vehicle: vehicle.fleet_number };
 }

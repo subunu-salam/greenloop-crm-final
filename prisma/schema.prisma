@@ -1,0 +1,598 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// GreenLoop — Prisma schema for MongoDB
+//
+// How to read this file (beginner notes):
+//   • `model X { ... }`   = one MongoDB *collection*. @@map("x") is its real name.
+//   • each line in a model = one *field* in every document: name, type, options.
+//       String / Int / Float   → the value type.  A `?` after it means "may be null".
+//       @default(...)          → value used when you don't pass one on create.
+//       @id @map("_id")        → the primary key. MongoDB always calls it `_id`;
+//                                 @map lets our code keep calling it `id`.
+//       @unique / @@unique     → MongoDB builds a unique index (no duplicates).
+//       @@index                → a normal index so lookups on those fields are fast.
+//   • After editing this file run:   npx prisma db push   (creates indexes)
+//                                     npx prisma generate  (rebuilds the client)
+//
+// Design choices for this project (see docs/MONGODB-PRISMA-GUIDE.md):
+//   1. Numeric ids (1, 2, 3 …) are kept, because the CRM, driver app, customer
+//      app and Expo app all use them in URLs. MongoDB has no auto-increment, so
+//      server/prisma.js hands out the next number from the `counters` collection.
+//   2. Field names stay snake_case (full_name, vehicle_id …) so the JSON the API
+//      sends to the front-ends is exactly what it was with SQLite.
+//   3. Dates stay as text: 'YYYY-MM-DD' for days and 'YYYY-MM-DD HH:MM:SS' (UTC)
+//      for timestamps — so string comparisons and "starts with 2026-10" work.
+//   4. Yes/no flags stay as 0 / 1 (Int) — the front-ends check `=== 1`.
+//   5. Lists/objects that were stored as JSON text (items, lines, recurrence …)
+//      stay JSON text; the code JSON.parse()s them as before.
+//   6. Unique rules that only apply to *some* documents (e.g. "one earn-points
+//      entry per pickup") can't be written here; they live in
+//      server/mongo-indexes.js and are created by `npm run db:indexes`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// Hands out auto-increment ids: { _id: "pickups", seq: 812 }
+model Counter {
+  id  String @id @map("_id")
+  seq Int    @default(0)
+
+  @@map("counters")
+}
+
+// Key/value app settings (shift cutoff, company name, VAT …)
+model Setting {
+  key   String @id @map("_id")
+  value String
+
+  @@map("settings")
+}
+
+// ── People & fleet ───────────────────────────────────────────────────────────
+
+model User {
+  id            Int     @id @map("_id")
+  full_name     String
+  role          String // 'driver' | 'admin'
+  username      String? // unique for admins — enforced by a partial index (drivers have none)
+  password_hash String?
+  pin_hash      String?
+  phone         String?
+  vehicle_id    Int?
+  is_active     Int     @default(1)
+  crm_role      String? @default("owner")
+  created_at    String
+
+  @@index([role])
+  @@map("users")
+}
+
+model Vehicle {
+  id                 Int     @id @map("_id")
+  fleet_number       String  @unique
+  plate              String
+  max_daily_capacity Int     @default(15)
+  zone               String
+  is_active          Int     @default(1)
+  service_tags       String? @default("waste")
+  created_at         String
+
+  @@map("vehicles")
+}
+
+model VehicleCapacityOverride {
+  id         Int     @id @map("_id")
+  vehicle_id Int
+  date       String
+  capacity   Int
+  reason     String?
+  set_by     String?
+  created_at String
+
+  @@unique([vehicle_id, date])
+  @@map("vehicle_capacity_overrides")
+}
+
+model VehicleReport {
+  id             Int     @id @map("_id")
+  vehicle_id     Int
+  driver_id      Int?
+  source         String  @default("driver")
+  category       String
+  urgency        String  @default("normal")
+  description    String?
+  odometer_km    Int?
+  photo_url      String?
+  status         String  @default("open")
+  reported_at    String
+  service_date   String?
+  vendor         String?
+  work_done      String?
+  cost           Float?
+  paid_by        String?
+  payment_method String?
+  payment_ref    String?
+  receipt_url    String?
+  reimbursed     Int     @default(0)
+  next_due_date  String?
+  next_due_km    Int?
+  admin_note     String?
+  resolved_at    String?
+  resolved_by    String?
+  updated_at     String
+
+  @@index([status])
+  @@index([vehicle_id, reported_at])
+  @@map("vehicle_reports")
+}
+
+model DriverShift {
+  id            Int     @id @map("_id")
+  driver_id     Int
+  vehicle_id    Int?
+  work_date     String
+  clock_in_at   String
+  clock_in_lat  Float?
+  clock_in_lng  Float?
+  clock_out_at  String?
+  clock_out_lat Float?
+  clock_out_lng Float?
+  auto_in       Int     @default(0)
+  closed_by     String?
+
+  @@index([driver_id, work_date])
+  @@map("driver_shifts")
+}
+
+// ── Customers & jobs ─────────────────────────────────────────────────────────
+
+model Customer {
+  id               Int     @id @map("_id")
+  name             String
+  branch           String?
+  zone             String
+  frequency        Int     @default(2)
+  lat              Float
+  lng              Float
+  address          String?
+  contact_phone    String?
+  is_active        Int     @default(1)
+  account_id       Int?
+  email            String?
+  time_window      String?
+  portal_code_hash String?
+  access_notes     String?
+  created_at       String
+
+  @@index([account_id])
+  @@map("customers")
+}
+
+model Pickup {
+  id                  Int     @id @map("_id")
+  customer_id         Int
+  vehicle_id          Int?
+  driver_id           Int?
+  scheduled_date      String
+  seq                 Int     @default(0)
+  status              String  @default("pending") // pending | collected | canceled | overdue | rescheduled
+  completed_at        String?
+  photo_url           String?
+  gps_lat             Float?
+  gps_lng             Float?
+  anomaly_reason      String?
+  stage               String?
+  notes               String?
+  service_type        String? @default("WASTE")
+  time_window         String?
+  photo_taken_at      String?
+  confirmation_status String?
+  confirm_deadline    String?
+  plan_id             Int?
+  invoice_id          Int?
+  checklist           String?
+  proof_meta          String?
+  at_risk_alerted     Int?    @default(0)
+  is_revisit          Int?    @default(0)
+  billable            Int?    @default(1)
+  started_at          String?
+  arrived_at          String?
+  arrival_lat         Float?
+  arrival_lng         Float?
+  arrival_distance_m  Int?
+  arrival_photo_url   String?
+  arrival_meta        String?
+  segregation_rating  String?
+  created_at          String
+  updated_at          String
+
+  @@index([scheduled_date, status])
+  @@index([status])
+  @@index([customer_id, scheduled_date])
+  @@index([driver_id, scheduled_date])
+  @@index([vehicle_id, scheduled_date])
+  @@index([completed_at])
+  @@index([invoice_id])
+  @@index([confirmation_status])
+  @@index([plan_id, scheduled_date])
+  @@map("pickups")
+}
+
+model Alert {
+  id         Int    @id @map("_id")
+  type       String
+  severity   String @default("info")
+  message    String
+  pickup_id  Int?
+  is_read    Int    @default(0)
+  created_at String
+
+  @@index([is_read])
+  @@map("alerts")
+}
+
+model ServiceType {
+  id                   Int    @id @map("_id")
+  code                 String @unique
+  name                 String
+  category             String @default("waste")
+  default_duration_min Int    @default(20)
+  default_price        Float  @default(0)
+  checklist            String @default("[]")
+  is_active            Int    @default(1)
+
+  @@map("service_types")
+}
+
+model ServicePlan {
+  id           Int     @id @map("_id")
+  customer_id  Int
+  service_code String  @default("WASTE")
+  recurrence   String  @default("{\"type\":\"weekly\",\"days\":[0]}")
+  time_window  String  @default("07:00-12:00")
+  start_date   String
+  end_date     String?
+  paused       Int     @default(0)
+  pause_from   String?
+  pause_to     String?
+  unit_price   Float   @default(0)
+  billing      String  @default("monthly")
+  status       String  @default("active")
+  quotation_id Int?
+  created_at   String
+  updated_at   String
+
+  @@index([customer_id])
+  @@map("service_plans")
+}
+
+model PlanSkip {
+  id      Int     @id @map("_id")
+  plan_id Int
+  date    String
+  reason  String?
+
+  @@unique([plan_id, date])
+  @@map("plan_skips")
+}
+
+model Booking {
+  id           Int     @id @map("_id")
+  customer_id  Int
+  service_code String
+  date         String
+  time_window  String?
+  notes        String?
+  status       String  @default("requested")
+  pickup_id    Int?
+  created_at   String
+
+  @@index([customer_id])
+  @@map("bookings")
+}
+
+// ── Sales & billing ──────────────────────────────────────────────────────────
+
+model Lead {
+  id           Int     @id @map("_id")
+  contact      String
+  company      String?
+  phone        String?
+  email        String?
+  service_type String?
+  sites        String  @default("[]")
+  frequency    String?
+  source       String?
+  stage        String  @default("new")
+  lost_reason  String?
+  owner_id     Int?
+  follow_up_at String?
+  notes        String?
+  customer_id  Int?
+  created_at   String
+  updated_at   String
+
+  @@map("leads")
+}
+
+model Quotation {
+  id          Int     @id @map("_id")
+  lead_id     Int?
+  number      String
+  version     Int     @default(1)
+  items       String  @default("[]")
+  plan        String  @default("{}")
+  subtotal    Float   @default(0)
+  vat         Float   @default(0)
+  total       Float   @default(0)
+  valid_until String?
+  status      String  @default("draft")
+  sent_via    String?
+  sent_at     String?
+  sent_to     String?
+  accepted_at String?
+  share_token String?
+  notes       String?
+  created_by  Int?
+  created_at  String
+
+  @@unique([number, version])
+  @@index([lead_id])
+  @@index([share_token])
+  @@map("quotations")
+}
+
+model Invoice {
+  id          Int     @id @map("_id")
+  number      String  @unique
+  customer_id Int
+  period      String
+  job_ids     String  @default("[]")
+  lines       String  @default("[]")
+  subtotal    Float
+  vat         Float
+  amount      Float
+  due_date    String
+  status      String  @default("issued")
+  sent_at     String?
+  sent_count  Int     @default(0)
+  created_at  String
+
+  @@index([customer_id])
+  @@map("invoices")
+}
+
+model Payment {
+  id          Int     @id @map("_id")
+  invoice_id  Int
+  amount      Float
+  method      String
+  reference   String?
+  received_at String
+  recorded_by String?
+
+  @@index([invoice_id])
+  @@map("payments")
+}
+
+model AuditLog {
+  id        Int     @id @map("_id")
+  actor     String?
+  entity    String
+  entity_id String?
+  action    String
+  before    String?
+  after     String?
+  at        String
+
+  @@index([entity, entity_id])
+  @@map("audit_log")
+}
+
+// ── Customer portal ──────────────────────────────────────────────────────────
+
+model OtpCode {
+  id          Int     @id @map("_id")
+  customer_id Int
+  channel     String?
+  code_hash   String
+  expires_at  String
+  attempts    Int     @default(0)
+
+  @@index([customer_id])
+  @@map("otp_codes")
+}
+
+model CustomerNotification {
+  id          Int     @id @map("_id")
+  customer_id Int
+  kind        String?
+  title       String?
+  body        String?
+  link        String?
+  is_read     Int     @default(0)
+  created_at  String
+
+  @@index([customer_id])
+  @@map("customer_notifications")
+}
+
+model CustomerIssue {
+  id                Int     @id @map("_id")
+  customer_id       Int
+  pickup_id         Int?
+  category          String
+  description       String
+  photo_url         String?
+  status            String  @default("open")
+  priority          String  @default("normal")
+  assigned_to       String?
+  response_h        Int     @default(24)
+  due_at            String
+  first_response_at String?
+  resolved_at       String?
+  is_demo           Int     @default(0)
+  created_at        String
+  updated_at        String
+
+  @@index([customer_id, status])
+  @@map("customer_issues")
+}
+
+model IssueMessage {
+  id          Int     @id @map("_id")
+  issue_id    Int
+  author_role String
+  author_name String?
+  body        String
+  created_at  String
+
+  @@index([issue_id])
+  @@map("issue_messages")
+}
+
+// ── Push notifications ───────────────────────────────────────────────────────
+
+model PushSubscription {
+  id         Int    @id @map("_id")
+  role       String
+  user_ref   String
+  endpoint   String @unique
+  p256dh     String
+  auth       String
+  created_at String
+
+  @@index([role, user_ref])
+  @@map("push_subscriptions")
+}
+
+model PushBroadcast {
+  id         Int     @id @map("_id")
+  audience   String
+  title      String
+  body       String
+  url        String?
+  recipients Int     @default(0)
+  devices    Int     @default(0)
+  delivered  Int     @default(0)
+  failed     Int     @default(0)
+  removed    Int     @default(0)
+  sent_by    String?
+  created_at String
+
+  @@map("push_broadcasts")
+}
+
+// ── Growth: health scores, rewards, waste scanner ────────────────────────────
+
+model HealthScore {
+  customer_id    Int     @id @map("_id")
+  score          Int
+  band           String
+  reasons        String  @default("[]")
+  factors        String  @default("{}")
+  prev_band      String?
+  band_since     String?
+  computed_at    String
+  contacted_at   String?
+  contacted_by   String?
+  contact_note   String?
+  contact_status String?
+  follow_up_at   String?
+
+  @@map("health_scores")
+}
+
+model HealthContact {
+  id             Int     @id @map("_id")
+  customer_id    Int
+  method         String
+  note           String?
+  contact_status String
+  follow_up_at   String?
+  by_name        String?
+  is_demo        Int     @default(0)
+  created_at     String
+
+  @@index([customer_id, created_at])
+  @@map("health_contacts")
+}
+
+model RewardCatalog {
+  id           Int     @id @map("_id")
+  name         String
+  points_cost  Int
+  discount_aed Float   @default(0)
+  is_active    Int     @default(1)
+  kind         String?
+  description  String?
+
+  @@map("rewards_catalog")
+}
+
+model RewardPoint {
+  id          Int     @id @map("_id")
+  customer_id Int
+  pickup_id   Int?
+  points      Int
+  kind        String // earn | redeem | adjust | refund …
+  reason      String?
+  created_by  String?
+  created_at  String
+
+  @@index([customer_id, created_at])
+  @@index([pickup_id])
+  @@map("reward_points")
+}
+
+model RewardRedemption {
+  id           Int     @id @map("_id")
+  customer_id  Int
+  reward_id    Int
+  reward_name  String
+  points       Int
+  discount_aed Float   @default(0)
+  status       String  @default("requested")
+  note         String?
+  decided_by   String?
+  decided_at   String?
+  created_at   String
+
+  @@index([customer_id])
+  @@map("reward_redemptions")
+}
+
+model WasteScanRule {
+  category     String @id @map("_id")
+  label        String
+  service_code String
+  hazardous    Int    @default(0)
+  tip          String @default("")
+
+  @@map("waste_scan_rules")
+}
+
+model WasteScan {
+  id           Int     @id @map("_id")
+  customer_id  Int
+  source       String  @default("ai")
+  categories   String  @default("[]")
+  volume       String?
+  tips         String  @default("[]")
+  summary      String?
+  service_code String?
+  est_price    Float?
+  hazardous    Int     @default(0)
+  photo_url    String?
+  lead_id      Int?
+  created_at   String
+
+  @@index([customer_id])
+  @@map("waste_scans")
+}
