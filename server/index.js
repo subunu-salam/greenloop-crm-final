@@ -136,6 +136,7 @@ async function boot() {
   await v3.init();
   await growth.init();
   await require('./customer-api').seedPortalCodes();
+  await require('./demo-logins').ensureDemoLogins();
   try {
     require('./push');
     console.log('✔ Web Push (VAPID) ready');
